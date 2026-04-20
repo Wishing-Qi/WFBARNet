@@ -342,7 +342,6 @@ def create_video_panel() -> None:
             height,
             _empty_texture_data(),
             tag="video_texture",
-            format=dpg.mvFormat_Float_rgba,
         )
 
     with dpg.child_window(tag="video_panel", border=True, height=VIDEO_PANEL_HEIGHT, no_scrollbar=True):
