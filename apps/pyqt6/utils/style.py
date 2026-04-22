@@ -56,7 +56,7 @@ def apply_theme(app: QApplication, theme_dir: Path) -> None:
     app.setStyleSheet(_merge_theme(theme_dir))
 
 
-def load_stylesheet(app: QApplication, theme_name: str = "fluent_light") -> Path | None:
+def load_stylesheet(app: QApplication, theme_name: str = "office_light") -> Path | None:
     """初始化字体、Fusion 风格，并加载默认主题。返回已加载的主题目录。"""
     app.setStyle("Fusion")
 

@@ -9,16 +9,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 import cv2
+import numpy as np
 
 from src.builders.bst_input_builder import BSTInputBuilder
 from src.models.pose_branch import PoseBranch
 from src.models.track_branch import TrackBranch
-from src.runners.pose_video_runner import PoseVideoRunner
-from src.runners.track_video_runner import TrackVideoRunner
-from src.runners.unified_runner import UnifiedRunner
 from src.utils.structures import FrameResult
-from src.utils.video import iter_frame_windows, load_frames
-from src.utils.visualize import save_visualization_video
 
 from apps.pyqt6.models.analysis_types import AnalysisAction, AnalysisResult
 
@@ -140,51 +136,107 @@ class AnalysisService:
         pose_branch = self._build_pose_branch()
         track_branch = self._build_track_branch()
 
-        self._emit(progress_callback, {"type": "stage", "stage": "正在读取视频帧...", "progress": 0.08})
-        frames = load_frames(str(source))
-        if not frames:
-            raise RuntimeError(f"无法从视频加载帧: {video_path}")
-
-        if self.config.max_frames and self.config.max_frames > 0:
-            frames = frames[: self.config.max_frames]
-
         probe = self._probe_video(str(source))
         fps = float(probe["fps"] or 0.0)
         if fps <= 0:
             fps = 25.0
+        total_frames = int(probe["frame_count"] or 0)
+        max_frames = self.config.max_frames if self.config.max_frames and self.config.max_frames > 0 else total_frames
 
         resolved_output_dir = Path(output_dir) if output_dir is not None else self._default_output_dir(source)
         resolved_output_dir.mkdir(parents=True, exist_ok=True)
 
         results: list[FrameResult] = []
+        # 可视化视频写入器（流式，避免二次遍历）
+        vis_writer: cv2.VideoWriter | None = None
+        vis_path: Path | None = None
+        if self.config.save_vis:
+            vis_path = resolved_output_dir / "analysis_vis.mp4"
+            w, h = int(probe["width"] or 0), int(probe["height"] or 0)
+            if w > 0 and h > 0:
+                vis_writer = cv2.VideoWriter(
+                    str(vis_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h)
+                )
+
         start_time = time.perf_counter()
-        total_frames = max(len(frames), 1)
+        cap = cv2.VideoCapture(str(source))
+        if not cap.isOpened():
+            raise RuntimeError(f"无法打开视频文件: {video_path}")
 
-        self._emit(progress_callback, {"type": "stage", "stage": "正在执行逐帧分析...", "progress": 0.12})
-        for index, (frame_id, frame, window) in enumerate(iter_frame_windows(frames)):
-            if stop_requested is not None and stop_requested():
-                break
+        self._emit(progress_callback, {"type": "stage", "stage": "正在执行逐帧分析...", "progress": 0.08})
 
-            pose = pose_branch.infer(frame)
-            _, track = track_branch.infer(window)
-            result = FrameResult(frame_id=frame_id, pose=pose, track=track)
-            results.append(result)
+        BATCH = 16  # 批量大小，可根据显存/内存调整
+        frame_buffer: list[np.ndarray] = []   # 滑动窗口（最多 3 帧）
+        batch_frames: list[np.ndarray] = []   # 当前批次的原始帧
+        batch_windows: list[list[np.ndarray]] = []  # 当前批次的 3 帧窗口
+        frame_id = 0
+        count_denom = max(max_frames, 1) if max_frames > 0 else max(total_frames, 1)
 
-            progress = min((index + 1) / total_frames, 0.98)
+        def _flush_batch() -> None:
+            if not batch_frames:
+                return
+            # 批量 track 推理
+            _, track_results = track_branch.infer_batch(batch_windows)
+            for i, (frame, track) in enumerate(zip(batch_frames, track_results)):
+                pose = pose_branch.infer(frame)
+                fr = FrameResult(frame_id=frame_id - len(batch_frames) + i, pose=pose, track=track)
+                results.append(fr)
+                if vis_writer is not None:
+                    from src.utils.visualize import draw_result
+                    vis_writer.write(draw_result(frame, fr))
+            # 每批次更新一次进度
+            progress = min(frame_id / count_denom, 0.98)
             self._emit(
                 progress_callback,
                 {
                     "type": "frame",
-                    "stage": f"正在分析第 {index + 1}/{total_frames} 帧",
+                    "stage": f"正在分析第 {frame_id}/{count_denom} 帧",
                     "progress": progress,
-                    "frame_id": frame_id,
+                    "frame_id": frame_id - 1,
                     "track": {
-                        "ball_xy": track.ball_xy,
-                        "visible": bool(track.visible),
-                        "score": float(track.score),
+                        "ball_xy": track_results[-1].ball_xy,
+                        "visible": bool(track_results[-1].visible),
+                        "score": float(track_results[-1].score),
                     },
                 },
             )
+            batch_frames.clear()
+            batch_windows.clear()
+
+        try:
+            while True:
+                if stop_requested is not None and stop_requested():
+                    break
+                if max_frames > 0 and frame_id >= max_frames:
+                    break
+
+                ok, frame = cap.read()
+                if not ok:
+                    break
+
+                frame_buffer.append(frame)
+                if len(frame_buffer) > 3:
+                    frame_buffer.pop(0)
+
+                buf_len = len(frame_buffer)
+                window = [
+                    frame_buffer[max(0, buf_len - 3)],
+                    frame_buffer[max(0, buf_len - 2)],
+                    frame_buffer[buf_len - 1],
+                ]
+
+                batch_frames.append(frame)
+                batch_windows.append(window)
+                frame_id += 1
+
+                if len(batch_frames) >= BATCH:
+                    _flush_batch()
+
+            _flush_batch()  # 处理剩余帧
+        finally:
+            cap.release()
+            if vis_writer is not None:
+                vis_writer.release()
 
         inference_seconds = time.perf_counter() - start_time
         if not results:
@@ -195,16 +247,14 @@ class AnalysisService:
         BSTInputBuilder(normalize=False).save(results, bst_path)
         output_files["BST 输入"] = str(bst_path)
 
+        if vis_path is not None and vis_path.exists():
+            output_files["可视化视频"] = str(vis_path)
+
         actions = self._build_actions(results, fps)
         avg_confidence = sum(item.track.score for item in results) / len(results)
         valid_pose_frames = sum(1 for item in results if item.pose)
         valid_track_frames = sum(1 for item in results if item.track.visible)
         summary_message = f"已完成对 {source.name} 的分析，生成 {len(actions)} 个动作片段"
-
-        if self.config.save_vis:
-            vis_path = resolved_output_dir / "analysis_vis.mp4"
-            save_visualization_video(frames[: len(results)], results, vis_path, fps=fps)
-            output_files["可视化视频"] = str(vis_path)
 
         self._emit(progress_callback, {"type": "stage", "stage": "分析完成，正在整理结果...", "progress": 1.0})
         return AnalysisResult(

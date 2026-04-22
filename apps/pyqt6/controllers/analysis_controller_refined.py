@@ -151,9 +151,7 @@ class MainController:
         if self._worker is not None and self._worker.isRunning():
             self.view.append_log("[Warn] 正在强制停止分析任务...")
             self._worker.request_stop()
-            if not self._worker.wait(400):
-                self._worker.terminate()
-                self._worker.wait(1500)
+            self._worker.terminate()
             self._worker = None
             self.view.append_log("[System] 分析任务已强制停止。")
         else:
@@ -216,9 +214,7 @@ class MainController:
         if self._worker is not None and self._worker.isRunning():
             self.view.append_log("[Warn] 重置前先终止当前任务...")
             self._worker.request_stop()
-            if not self._worker.wait(400):
-                self._worker.terminate()
-                self._worker.wait(1500)
+            self._worker.terminate()
             self._worker = None
 
         self._selected_video_path = None
@@ -230,8 +226,9 @@ class MainController:
         self._set_idle_state()
 
     def _on_style_action_triggered(self, action) -> None:
-        theme_name = action.data()
-        self.view.style_btn.setText(f"{theme_name}  ▾")
+        theme_name = str(action.data() or action.text()).strip()
+        theme_label = action.text().strip() or theme_name.replace("_", " ").title()
+        self.view.style_btn.setText(f"{theme_label}  ▾")
         self.handle_style_changed(theme_name)
 
     def handle_style_changed(self, theme_name: str) -> None:

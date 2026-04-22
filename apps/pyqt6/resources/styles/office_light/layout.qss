@@ -9,14 +9,15 @@ QFrame#analyticsCard,
 QFrame#metricCard,
 QFrame#emptyStateCard {
     background-color: #FFFFFF;
-    border: 1px solid #E2E8F0;
-    border-radius: 6px;
+    border: 1px solid #525252;
+    border-radius: 2px;
 }
 
 /* previewCard 底部与 videoPlayerCard 无缝衔接 */
 /* headerCard 顶部品牌色强调线 */
 QFrame#headerCard {
-    border-top: 3px solid #0F6CBD;
+    background-color: #F8F8F8;
+    border-top: 3px solid #525252;
 }
 
 QFrame#metricCard {
@@ -26,21 +27,21 @@ QFrame#metricCard {
 /* --- 视频播放器容器 --- */
 QFrame#videoPlayerCard {
     background-color: #FFFFFF;
-    border: 1px solid #E2E8F0;
-    border-radius: 6px;
+    border: 1px solid #525252;
+    border-radius: 2px;
 }
 
 QFrame#videoControlsBar {
-    background-color: #F8FAFC;
-    border: 1px solid #E2E8F0;
-    border-radius: 4px;
+    background-color: #F7F7F7;
+    border: 1px solid #525252;
+    border-radius: 2px;
     padding: 6px;
 }
 
 QWidget#timelineBar {
     background: transparent;
     border: none;
-    border-top: 1px solid #E2E8F0;
+    border-top: 1px solid #D9D9D9;
     padding: 0px;
 }
 

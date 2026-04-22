@@ -12,12 +12,6 @@ QFrame#emptyStateCard {
     border-radius: 6px;
 }
 
-QFrame#previewCard {
-    border-bottom: none;
-    border-bottom-left-radius: 0px;
-    border-bottom-right-radius: 0px;
-}
-
 QFrame#headerCard {
     border-top: 3px solid #4FA3E0;
 }
@@ -42,6 +36,7 @@ QFrame#videoControlsBar {
 QWidget#timelineBar {
     background: transparent;
     border: none;
+    border-top: 1px solid #313744;
     padding: 0px;
 }
 

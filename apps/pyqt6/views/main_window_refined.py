@@ -134,15 +134,17 @@ class MainWindow(QMainWindow):
         header_layout.addLayout(actions_col, stretch=0)
         self.root_layout.addWidget(self.header_card)
 
-    def populate_stylesheets(self, theme_dirs: list[Path], active_name: str = "fluent_light") -> None:
+    def populate_stylesheets(self, theme_dirs: list[Path], active_name: str = "office_light") -> None:
         self._style_menu.clear()
         for theme_dir in theme_dirs:
-            action = QAction(theme_dir.name, self._style_menu)
+            display_name = theme_dir.name.replace("_", " ").title()
+            action = QAction(display_name, self._style_menu)
             action.setData(theme_dir.name)
             self._style_menu.addAction(action)
 
         active = active_name if any(d.name == active_name for d in theme_dirs) else (theme_dirs[0].name if theme_dirs else "")
-        self.style_btn.setText(f"{active}  ▾")
+        active_label = active.replace("_", " ").title() if active else ""
+        self.style_btn.setText(f"{active_label}  ▾")
 
     def _build_body(self) -> None:
         body_layout = QHBoxLayout()
@@ -154,11 +156,6 @@ class MainWindow(QMainWindow):
         self.root_layout.addLayout(body_layout, stretch=1)
 
     def _build_preview_panel(self, body_layout: QHBoxLayout) -> None:
-        left_column = QWidget()
-        left_column_layout = QVBoxLayout(left_column)
-        left_column_layout.setContentsMargins(0, 0, 0, 0)
-        left_column_layout.setSpacing(12)
-
         preview_panel = QFrame()
         preview_panel.setObjectName("previewCard")
         preview_panel.setSizePolicy(
@@ -195,17 +192,16 @@ class MainWindow(QMainWindow):
             QSizePolicy.Policy.Fixed,
         )
         timeline_bar_layout = QVBoxLayout(timeline_bar)
-        timeline_bar_layout.setContentsMargins(12, 8, 12, 10)
+        timeline_bar_layout.setContentsMargins(0, 8, 0, 0)
         timeline_bar_layout.setSpacing(0)
         timeline_bar_layout.addWidget(self.video_timeline)
 
         preview_layout.addLayout(preview_header)
-        left_column_layout.addWidget(video_controls)
-        preview_layout.addWidget(self.video_player, 1)
-        preview_layout.addWidget(timeline_bar, 0)
-        left_column_layout.addWidget(preview_panel, 1)
+        preview_layout.addWidget(video_controls, 0)
+        preview_layout.addWidget(self.video_player, 0)
+        # preview_layout.addWidget(timeline_bar, 0)
 
-        body_layout.addWidget(left_column, stretch=6)
+        body_layout.addWidget(preview_panel, stretch=6)
 
     def _build_analytics_panel(self, body_layout: QHBoxLayout) -> None:
         analytics_panel = QFrame()

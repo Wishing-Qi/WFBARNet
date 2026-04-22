@@ -31,17 +31,7 @@ class VideoPlayerWidget(QFrame):
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(12)
-
-        header_row = QHBoxLayout()
-        header_row.setSpacing(10)
-
-        self.state_label = QLabel("未加载视频")
-        self.state_label.setObjectName("videoStatus")
-        self.state_label.setProperty("state", "idle")
-
-        header_row.addStretch(1)
-        header_row.addWidget(self.state_label)
+        outer.setSpacing(0)
 
         self.btn_select_video = QPushButton("选择视频")
         self.btn_select_video.setObjectName("btnSelectVideo")
@@ -82,50 +72,29 @@ class VideoPlayerWidget(QFrame):
         self.player.setAudioOutput(self.audio_output)
         self.player.setVideoOutput(self.video_widget)
 
-        outer.addLayout(header_row)
         outer.addWidget(self.preview_stack, stretch=1)
 
         self.btn_select_video.clicked.connect(self.selectRequested.emit)
         self.btn_force_stop.clicked.connect(self.forceStopRequested.emit)
 
-    def _refresh_state_label(self) -> None:
-        self.state_label.style().unpolish(self.state_label)
-        self.state_label.style().polish(self.state_label)
-        self.state_label.update()
+        self.player.mediaStatusChanged.connect(self._on_media_status_changed)
+        self.player.playbackStateChanged.connect(self._on_playback_state_changed)
 
     def _set_status(self, text: str, state: str) -> None:
-        self.state_label.setText(text)
-        self.state_label.setProperty("state", state)
-        self._refresh_state_label()
+        pass  # state_label 已移除
 
     def _on_media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
-        if status == QMediaPlayer.MediaStatus.EndOfMedia:
-            self._set_status("播放结束", "stopped")
-        elif status == QMediaPlayer.MediaStatus.LoadedMedia and self._source_path:
+        if status == QMediaPlayer.MediaStatus.LoadedMedia and self._source_path:
             self.preview_stack.setCurrentWidget(self.video_widget)
-            self._set_status("已加载视频", "loaded")
-        elif status == QMediaPlayer.MediaStatus.InvalidMedia:
-            self._set_status("视频加载失败", "error")
 
     def _on_playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
-        if state == QMediaPlayer.PlaybackState.PlayingState:
-            self.preview_stack.setCurrentWidget(self.video_widget)
-            self._set_status("播放中", "playing")
-        elif state == QMediaPlayer.PlaybackState.PausedState:
-            if self._source_path:
-                self._set_status("已加载视频", "loaded")
-        elif state == QMediaPlayer.PlaybackState.StoppedState:
-            if self._source_path:
-                self._set_status("已停止", "stopped")
+        pass  # 可在此处添加播放状态变化时的处理逻辑
 
     def set_video_path(self, path: str) -> None:
         self._source_path = path
         self.path_edit.setText(path)
         self.path_edit.setToolTip(path)
-        self.preview_stack.setCurrentWidget(self.video_widget)
         self.player.setSource(QUrl.fromLocalFile(path))
-        self.player.setPosition(0)
-        self._set_status("已加载视频", "loaded")
 
     def clear_video(self) -> None:
         self._source_path = ""

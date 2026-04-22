@@ -27,7 +27,7 @@ def main() -> int:
     app.setEffectEnabled(Qt.UIEffect.UI_AnimateCombo, False)
     app.setEffectEnabled(Qt.UIEffect.UI_AnimateTooltip, False)
 
-    load_stylesheet(app)
+    load_stylesheet(app, "office_light")
 
     window = MainWindow()
     controller = MainController(window)

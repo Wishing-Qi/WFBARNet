@@ -1,0 +1,20 @@
+/* ============================================================
+ *  BASE  —  全局根元素样式
+ * ============================================================ */
+
+QMainWindow {
+    background-color: #F3F3F3;
+    color: #1F1F1F;
+    font-family: "Segoe UI", "Microsoft YaHei", -apple-system, sans-serif;
+    font-size: 14px;
+}
+
+QWidget {
+    color: #1F1F1F;
+    font-family: "Segoe UI", "Microsoft YaHei", -apple-system, sans-serif;
+    font-size: 14px;
+}
+
+#appRoot {
+    background-color: #F3F3F3;
+}
