@@ -12,6 +12,26 @@ from apps.pyqt6.utils.style import apply_theme, discover_themes
 from apps.pyqt6.views.main_window_refined import MainWindow
 
 
+class ProbeWorker(QThread):
+    """后台探测视频元数据，避免主线程阻塞。"""
+    finished = pyqtSignal(str, dict)  # (file_path, metadata)
+
+    def __init__(self, file_path: str) -> None:
+        super().__init__()
+        self._file_path = file_path
+
+    def run(self) -> None:
+        cap = cv2.VideoCapture(self._file_path)
+        if not cap.isOpened():
+            self.finished.emit(self._file_path, {"fps": 0.0, "width": 0, "height": 0})
+            return
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        cap.release()
+        self.finished.emit(self._file_path, {"fps": fps, "width": width, "height": height})
+
+
 class AnalysisWorker(QThread):
     progress_payload = pyqtSignal(object)
     finished_with_result = pyqtSignal(object)
@@ -49,12 +69,13 @@ class MainController:
         self.service = AnalysisService()
         self._selected_video_path: str | None = None
         self._worker: AnalysisWorker | None = None
+        self._probe_worker: ProbeWorker | None = None
         self._theme_dirs = discover_themes()
 
         self._bind_events()
         self.view.populate_stylesheets(self._theme_dirs)
         self._set_idle_state()
-        self.view.append_log("[System] 界面已初始化，等待用户操作。")
+        self.view.append_log(f"[System] 界面已初始化，推理设备: {self.service.config.device}")
 
     def _bind_events(self) -> None:
         self.view.btn_analyze.clicked.connect(self.handle_analyze)
@@ -104,15 +125,24 @@ class MainController:
             return
 
         self._selected_video_path = file_path
-        metadata = self._probe_video_metadata(file_path)
+        self.view.set_video_path(file_path)
+        self.view.append_log(f"[Info] 正在读取视频信息: {Path(file_path).name}")
+
+        # 后台探测元数据，不阻塞主线程
+        self._probe_worker = ProbeWorker(file_path)
+        self._probe_worker.finished.connect(self._on_probe_finished)
+        self._probe_worker.start()
+
+    def _on_probe_finished(self, file_path: str, metadata: dict) -> None:
+        self._probe_worker = None
+        if file_path != self._selected_video_path:
+            return  # 用户已切换到其他视频
         file_name = Path(file_path).name
         resolution = (
             f"{metadata['width']} x {metadata['height']}"
             if metadata["width"] and metadata["height"]
             else "分辨率未知"
         )
-
-        self.view.set_video_path(file_path)
         self.view.set_video_state("loaded")
         self.view.btn_analyze.setEnabled(True)
         self.view.append_log(
@@ -148,12 +178,16 @@ class MainController:
         self._worker.start()
 
     def handle_force_stop(self) -> None:
-        if self._worker is not None and self._worker.isRunning():
-            self.view.append_log("[Warn] 正在强制停止分析任务...")
-            self._worker.request_stop()
-            self._worker.terminate()
+        if self._worker is not None:
+            if self._worker.isRunning():
+                self.view.append_log("[Warn] 正在停止分析任务...")
+                self._worker.request_stop()
+                self._worker.wait(1000)
+                if self._worker.isRunning():
+                    self._worker.quit()
+                    self._worker.wait(500)
+                self.view.append_log("[System] 分析任务已停止。")
             self._worker = None
-            self.view.append_log("[System] 分析任务已强制停止。")
         else:
             self.view.append_log("[System] 视频预览已暂停。")
 
@@ -211,11 +245,21 @@ class MainController:
         self.view.append_log(result.to_display_text())
 
     def handle_reset(self) -> None:
-        if self._worker is not None and self._worker.isRunning():
-            self.view.append_log("[Warn] 重置前先终止当前任务...")
-            self._worker.request_stop()
-            self._worker.terminate()
+        if self._worker is not None:
+            if self._worker.isRunning():
+                self.view.append_log("[Warn] 正在停止当前任务...")
+                self._worker.request_stop()
+                self._worker.wait(1000)
+                if self._worker.isRunning():
+                    self._worker.quit()
+                    self._worker.wait(500)
             self._worker = None
+
+        if self._probe_worker is not None:
+            if self._probe_worker.isRunning():
+                self._probe_worker.quit()
+                self._probe_worker.wait(500)
+            self._probe_worker = None
 
         self._selected_video_path = None
         self.view.clear_video()

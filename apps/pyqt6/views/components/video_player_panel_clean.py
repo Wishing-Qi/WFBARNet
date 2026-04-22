@@ -3,12 +3,14 @@ from __future__ import annotations
 from PyQt6.QtCore import Qt, QUrl, pyqtSignal
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PyQt6.QtMultimediaWidgets import QVideoWidget
+from PyQt6.sip import isdeleted
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
+    QSizePolicy,
     QSlider,
     QStackedWidget,
     QVBoxLayout,
@@ -47,6 +49,9 @@ class VideoPlayerWidget(QFrame):
 
         self.preview_stack = QStackedWidget()
         self.preview_stack.setObjectName("videoStack")
+        self.preview_stack.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
 
         placeholder_page = QWidget()
         placeholder_layout = QVBoxLayout(placeholder_page)
@@ -62,6 +67,9 @@ class VideoPlayerWidget(QFrame):
 
         self.video_widget = QVideoWidget()
         self.video_widget.setObjectName("videoOutput")
+        self.video_widget.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored
+        )
         self.preview_stack.addWidget(placeholder_page)
         self.preview_stack.addWidget(self.video_widget)
         self.preview_stack.setCurrentWidget(placeholder_page)
@@ -86,9 +94,12 @@ class VideoPlayerWidget(QFrame):
     def _on_media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
         if status == QMediaPlayer.MediaStatus.LoadedMedia and self._source_path:
             self.preview_stack.setCurrentWidget(self.video_widget)
+            # play 再 pause 让 WMF 后端渲染第一帧，否则黑屏
+            self.player.play()
+            self.player.pause()
 
     def _on_playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
-        pass  # 可在此处添加播放状态变化时的处理逻辑
+        pass
 
     def set_video_path(self, path: str) -> None:
         self._source_path = path
@@ -98,15 +109,17 @@ class VideoPlayerWidget(QFrame):
 
     def clear_video(self) -> None:
         self._source_path = ""
-        self.path_edit.clear()
-        self.path_edit.setToolTip("")
+        if not isdeleted(self.path_edit):
+            self.path_edit.clear()
+            self.path_edit.setToolTip("")
         self.player.stop()
         self.player.setSource(QUrl())
-        self.preview_stack.setCurrentWidget(self.preview_stack.widget(0))
+        if not isdeleted(self.preview_stack) and self.preview_stack.count() > 0:
+            self.preview_stack.setCurrentWidget(self.preview_stack.widget(0))
         self._set_status("未加载视频", "idle")
 
     def play(self) -> None:
-        if self._source_path:
+        if self._source_path and not isdeleted(self.preview_stack):
             self.preview_stack.setCurrentWidget(self.video_widget)
             self.player.play()
 
@@ -117,7 +130,7 @@ class VideoPlayerWidget(QFrame):
         self.player.stop()
         if self._source_path:
             self._set_status("已停止", "stopped")
-        else:
+        elif not isdeleted(self.preview_stack) and self.preview_stack.count() > 0:
             self.preview_stack.setCurrentWidget(self.preview_stack.widget(0))
             self._set_status("未加载视频", "idle")
 
@@ -185,27 +198,34 @@ class VideoTimelineWidget(QFrame):
 
     def _on_slider_moved(self, value: int) -> None:
         self._player.setPosition(value)
-        self.time_label.setText(
-            f"{self._format_time(value)} / {self._format_time(self._duration_ms)}"
-        )
+        if not isdeleted(self.time_label):
+            self.time_label.setText(
+                f"{self._format_time(value)} / {self._format_time(self._duration_ms)}"
+            )
 
     def _on_duration_changed(self, duration: int) -> None:
         self._duration_ms = max(0, duration)
-        self.seek_slider.setRange(0, self._duration_ms)
-        self.time_label.setText(
-            f"{self._format_time(self._player.position())} / {self._format_time(self._duration_ms)}"
-        )
+        if not isdeleted(self.seek_slider):
+            self.seek_slider.setRange(0, self._duration_ms)
+        if not isdeleted(self.time_label):
+            self.time_label.setText(
+                f"{self._format_time(self._player.position())} / {self._format_time(self._duration_ms)}"
+            )
 
     def _on_position_changed(self, position: int) -> None:
         if not self._dragging:
-            self.seek_slider.setValue(position)
-        self.time_label.setText(
-            f"{self._format_time(position)} / {self._format_time(self._duration_ms)}"
-        )
+            if not isdeleted(self.seek_slider):
+                self.seek_slider.setValue(position)
+        if not isdeleted(self.time_label):
+            self.time_label.setText(
+                f"{self._format_time(position)} / {self._format_time(self._duration_ms)}"
+            )
 
     def reset(self) -> None:
         self._dragging = False
         self._duration_ms = 0
-        self.seek_slider.setRange(0, 0)
-        self.seek_slider.setValue(0)
-        self.time_label.setText("00:00 / 00:00")
+        if not isdeleted(self.seek_slider):
+            self.seek_slider.setRange(0, 0)
+            self.seek_slider.setValue(0)
+        if not isdeleted(self.time_label):
+            self.time_label.setText("00:00 / 00:00")

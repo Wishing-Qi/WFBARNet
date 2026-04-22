@@ -37,8 +37,9 @@ class AnalysisConfig:
     save_json: bool = True
     save_csv: bool = True
     save_npy: bool = True
-    save_vis: bool = True
+    save_vis: bool = False
     max_frames: int = 0
+    pose_stride: int = 3  # 每隔 N 帧做一次 pose 推理，中间帧复用
 
 
 class AnalysisService:
@@ -52,10 +53,14 @@ class AnalysisService:
         path = Path(config_path) if config_path is not None else self.project_root / "configs" / "default_infer.json"
         if path.exists():
             data = json.loads(path.read_text(encoding="utf-8"))
+            device = str(data.get("device", "auto"))
+            if device == "auto":
+                import torch
+                device = "cuda" if torch.cuda.is_available() else "cpu"
             return AnalysisConfig(
                 source=str(data.get("source", "")),
                 output_dir=str(data.get("output_dir", "outputs/run")),
-                device=str(data.get("device", "cpu")),
+                device=device,
                 execution_mode=str(data.get("execution_mode", "serial")),
                 pose_backend=str(data.get("pose_backend", "mmpose")),
                 pose_config=str(data.get("pose_config", "")),
@@ -65,9 +70,11 @@ class AnalysisService:
                 save_json=bool(data.get("save_json", True)),
                 save_csv=bool(data.get("save_csv", True)),
                 save_npy=bool(data.get("save_npy", True)),
-                save_vis=bool(data.get("save_vis", True)),
+                save_vis=bool(data.get("save_vis", False)),
+                pose_stride=int(data.get("pose_stride", 3)),
             )
-        return AnalysisConfig()
+        import torch
+        return AnalysisConfig(device="cuda" if torch.cuda.is_available() else "cpu")
 
     def _resolve_path(self, raw_path: str | None) -> str | None:
         if not raw_path:
@@ -165,26 +172,31 @@ class AnalysisService:
 
         self._emit(progress_callback, {"type": "stage", "stage": "正在执行逐帧分析...", "progress": 0.08})
 
-        BATCH = 16  # 批量大小，可根据显存/内存调整
-        frame_buffer: list[np.ndarray] = []   # 滑动窗口（最多 3 帧）
-        batch_frames: list[np.ndarray] = []   # 当前批次的原始帧
-        batch_windows: list[list[np.ndarray]] = []  # 当前批次的 3 帧窗口
+        BATCH = 16
+        frame_buffer: list[np.ndarray] = []
+        batch_frames: list[np.ndarray] = []
+        batch_windows: list[list[np.ndarray]] = []
         frame_id = 0
         count_denom = max(max_frames, 1) if max_frames > 0 else max(total_frames, 1)
+        pose_stride = max(1, self.config.pose_stride)
+        last_pose: list = []
 
         def _flush_batch() -> None:
+            nonlocal last_pose
             if not batch_frames:
                 return
-            # 批量 track 推理
             _, track_results = track_branch.infer_batch(batch_windows)
+            batch_start = frame_id - len(batch_frames)
             for i, (frame, track) in enumerate(zip(batch_frames, track_results)):
-                pose = pose_branch.infer(frame)
-                fr = FrameResult(frame_id=frame_id - len(batch_frames) + i, pose=pose, track=track)
+                fid = batch_start + i
+                # 每 pose_stride 帧才做一次 pose 推理
+                if fid % pose_stride == 0:
+                    last_pose = pose_branch.infer(frame)
+                fr = FrameResult(frame_id=fid, pose=last_pose, track=track)
                 results.append(fr)
                 if vis_writer is not None:
                     from src.utils.visualize import draw_result
                     vis_writer.write(draw_result(frame, fr))
-            # 每批次更新一次进度
             progress = min(frame_id / count_denom, 0.98)
             self._emit(
                 progress_callback,

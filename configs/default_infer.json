@@ -1,7 +1,7 @@
 {
   "source": "",
   "output_dir": "outputs/run",
-  "device": "cpu",
+  "device": "auto",
   "execution_mode": "serial",
   "pose_backend": "mmpose",
   "pose_config": "tools/mmpose/configs/rtmpose-s_8xb256-420e_coco-256x192.py",
@@ -11,5 +11,6 @@
   "save_json": true,
   "save_csv": true,
   "save_npy": true,
-  "save_vis": true
+  "save_vis": false,
+  "pose_stride": 3
 }
