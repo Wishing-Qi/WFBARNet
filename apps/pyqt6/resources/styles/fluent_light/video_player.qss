@@ -1,0 +1,67 @@
+/* ============================================================
+ *  VIDEO PLAYER  —  视频播放器组件专属样式
+ * ============================================================ */
+
+/* --- 占位符 --- */
+QLabel#videoLabel {
+    background-color: #F8FAFC;
+    border: 1px dashed #CBD5E1;
+    border-radius: 4px;
+    color: #64748B;
+    font-size: 15px;
+}
+
+QLabel#videoLabel[state="loaded"] {
+    border: 1px solid #BBF7D0;
+    color: #15803D;
+    background-color: #F0FDF4;
+}
+
+QLabel#videoPlaceholderTitle {
+    color: #1E293B;
+    font-size: 18px;
+    font-weight: 600;
+}
+
+QLabel#videoPlaceholderHint {
+    color: #64748B;
+}
+
+/* --- 时间标签 --- */
+QLabel#timeLabel {
+    padding-left: 8px;
+    color: #64748B;
+    min-width: 108px;
+}
+
+/* --- 时间轴滑块 --- */
+QSlider#videoTimeline {
+    min-height: 20px;
+}
+
+QSlider#videoTimeline::groove:horizontal {
+    height: 4px;
+    background: #E2E8F0;
+    border: none;
+    border-radius: 2px;
+}
+
+QSlider#videoTimeline::sub-page:horizontal {
+    background: #0F6CBD;
+    border-radius: 2px;
+}
+
+QSlider#videoTimeline::add-page:horizontal {
+    background: #E2E8F0;
+    border-radius: 2px;
+}
+
+QSlider#videoTimeline::handle:horizontal {
+    width: 12px;
+    margin: -4px 0;
+    background: #0F6CBD;
+    border-radius: 6px;
+}
+
+QSlider#videoTimeline::handle:horizontal:hover   { background: #005A9E; }
+QSlider#videoTimeline::handle:horizontal:pressed { background: #004A83; }

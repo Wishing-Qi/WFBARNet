@@ -37,6 +37,7 @@ class TrackTaskConfig:
     save_json: bool = True
     save_csv: bool = True
     save_npy: bool = True
+    batch_size: int = 8
 
 
 @dataclass
@@ -149,6 +150,7 @@ def run_tracknet_task(
 ) -> TrackTaskResult:
     config.output_dir.mkdir(parents=True, exist_ok=True)
     resolved_device = _resolve_device(config.device)
+    batch_size = config.batch_size
 
     _emit(progress_callback, {"type": "stage", "stage": "正在加载 TrackNetV3 模型权重", "progress": 0.03})
     branch = TrackBranch(
@@ -185,87 +187,77 @@ def run_tracknet_task(
         )
         output_files["可视化视频"] = str(vis_path)
 
-    ok, first_frame = cap.read()
-    if not ok:
-        cap.release()
+    all_frames = []
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        all_frames.append(frame)
+        if config.max_frames and len(all_frames) >= config.max_frames:
+            break
+
+    cap.release()
+
+    if len(all_frames) < 3:
         if writer is not None:
             writer.release()
-        raise RuntimeError("视频可以打开，但没有读取到任何帧。")
+        raise RuntimeError("视频帧数不足，无法进行 TrackNet 推理。")
 
-    ok, second_frame = cap.read()
-    if not ok:
-        second_frame = first_frame.copy()
+    frame_windows = []
+    for i in range(len(all_frames) - 2):
+        prev_frame = all_frames[i]
+        curr_frame = all_frames[i + 1]
+        next_frame = all_frames[i + 2]
+        frame_windows.append([prev_frame, curr_frame, next_frame])
 
-    prev_frame = first_frame.copy()
-    curr_frame = first_frame
-    next_frame = second_frame
-    frame_id = 0
     results: list[FrameResult] = []
     track_results: dict[int, dict[str, Any]] = {}
     last_frame: np.ndarray | None = None
     stopped = False
     start_time = time.perf_counter()
 
-    while True:
+    for batch_start in range(0, len(frame_windows), batch_size):
         if stop_requested is not None and stop_requested():
             stopped = True
             break
 
-        _, track = branch.infer([prev_frame, curr_frame, next_frame])
-        frame_result = FrameResult(frame_id=frame_id, pose=[], track=track)
-        results.append(frame_result)
-        track_results[frame_id] = {
-            "ball_xy": track.ball_xy,
-            "visible": bool(track.visible),
-            "score": track.score,
-        }
+        batch_end = min(batch_start + batch_size, len(frame_windows))
+        batch_windows = frame_windows[batch_start:batch_end]
 
-        annotated_frame = draw_result(curr_frame, frame_result)
-        last_frame = annotated_frame
-        if writer is not None:
-            writer.write(annotated_frame)
+        _, batch_tracks = branch.infer_batch(batch_windows)
 
-        processed = len(results)
-        progress = processed / expected_total if expected_total else 0.0
-        _emit(
-            progress_callback,
-            {
-                "type": "frame",
-                "stage": f"正在推理第 {processed} 帧",
-                "frame_id": frame_id,
-                "progress": min(progress, 0.98),
-                "frame": annotated_frame,
-                "track": track_results[frame_id],
-            },
-        )
+        for i, track in enumerate(batch_tracks):
+            frame_idx = batch_start + i
+            frame_id = frame_idx
+            curr_frame = all_frames[frame_idx + 1]
 
-        if config.max_frames is not None and config.max_frames > 0 and processed >= config.max_frames:
-            break
+            frame_result = FrameResult(frame_id=frame_id, pose=[], track=track)
+            results.append(frame_result)
+            track_results[frame_id] = {
+                "ball_xy": track.ball_xy,
+                "visible": bool(track.visible),
+                "score": track.score,
+            }
 
-        prev_frame = curr_frame
-        curr_frame = next_frame
-        ok, incoming = cap.read()
-        if not ok:
-            if frame_id > 0:
-                frame_id += 1
-                next_frame = curr_frame.copy()
-                _, final_track = branch.infer([prev_frame, curr_frame, next_frame])
-                final_result = FrameResult(frame_id=frame_id, pose=[], track=final_track)
-                results.append(final_result)
-                track_results[frame_id] = {
-                    "ball_xy": final_track.ball_xy,
-                    "visible": bool(final_track.visible),
-                    "score": final_track.score,
-                }
-                last_frame = draw_result(curr_frame, final_result)
-                if writer is not None and last_frame is not None:
-                    writer.write(last_frame)
-            break
+            annotated_frame = draw_result(curr_frame, frame_result)
+            last_frame = annotated_frame
+            if writer is not None:
+                writer.write(annotated_frame)
 
-        next_frame = incoming
-        frame_id += 1
+            processed = len(results)
+            progress = processed / expected_total if expected_total else 0.0
+            _emit(
+                progress_callback,
+                {
+                    "type": "frame",
+                    "stage": f"正在推理第 {processed} 帧（批处理）",
+                    "frame_id": frame_id,
+                    "progress": min(progress, 0.98),
+                    "frame": annotated_frame,
+                    "track": track_results[frame_id],
+                },
+            )
 
-    cap.release()
     if writer is not None:
         writer.release()
 

@@ -1,0 +1,60 @@
+/* ============================================================
+ *  VIDEO PLAYER  —  Fluent Dark
+ * ============================================================ */
+
+QLabel#videoLabel {
+    background-color: #2A2F3A;
+    border: 1px dashed #4A5060;
+    border-radius: 4px;
+    color: #8A95A8;
+    font-size: 15px;
+}
+
+QLabel#videoLabel[state="loaded"] {
+    border: 1px solid #166534;
+    color: #4ADE80;
+    background-color: #0D2B1A;
+}
+
+QLabel#videoPlaceholderTitle {
+    color: #C8D0DC;
+    font-size: 18px;
+    font-weight: 600;
+}
+
+QLabel#videoPlaceholderHint { color: #8A95A8; }
+
+QLabel#timeLabel {
+    padding-left: 8px;
+    color: #8A95A8;
+    min-width: 108px;
+}
+
+QSlider#videoTimeline { min-height: 20px; }
+
+QSlider#videoTimeline::groove:horizontal {
+    height: 4px;
+    background: #3A3F4B;
+    border: none;
+    border-radius: 2px;
+}
+
+QSlider#videoTimeline::sub-page:horizontal {
+    background: #4FA3E0;
+    border-radius: 2px;
+}
+
+QSlider#videoTimeline::add-page:horizontal {
+    background: #3A3F4B;
+    border-radius: 2px;
+}
+
+QSlider#videoTimeline::handle:horizontal {
+    width: 12px;
+    margin: -4px 0;
+    background: #4FA3E0;
+    border-radius: 6px;
+}
+
+QSlider#videoTimeline::handle:horizontal:hover   { background: #6BB8F0; }
+QSlider#videoTimeline::handle:horizontal:pressed { background: #3A8FCC; }

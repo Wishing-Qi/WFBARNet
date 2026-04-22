@@ -1,0 +1,20 @@
+/* ============================================================
+ *  BASE  —  Fluent Dark
+ * ============================================================ */
+
+QMainWindow {
+    background-color: #1A1D23;
+    color: #E8EDF5;
+    font-family: "Segoe UI", "Microsoft YaHei", -apple-system, sans-serif;
+    font-size: 14px;
+}
+
+QWidget {
+    color: #E8EDF5;
+    font-family: "Segoe UI", "Microsoft YaHei", -apple-system, sans-serif;
+    font-size: 14px;
+}
+
+#appRoot {
+    background-color: #1A1D23;
+}

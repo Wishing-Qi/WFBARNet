@@ -47,3 +47,44 @@ def decode_track_heatmap(
         score=score,
         heatmap_shape=list(heatmap.shape),
     )
+
+
+def decode_track_heatmap_batch(
+    batch_heatmaps: np.ndarray,
+    metas: list[TrackPreprocessMeta],
+    score_thr: float,
+) -> list[TrackResult]:
+    if batch_heatmaps.ndim != 4:
+        raise ValueError(f"Batch heatmaps must be 4D, got {batch_heatmaps.ndim}D")
+
+    batch_size = batch_heatmaps.shape[0]
+    if batch_size != len(metas):
+        raise ValueError(f"Heatmap batch size {batch_size} doesn't match metas length {len(metas)}")
+
+    results = []
+    for i in range(batch_size):
+        heatmap = batch_heatmaps[i, 1]
+        meta = metas[i]
+
+        score = float(np.max(heatmap))
+        binary_mask = (heatmap > score_thr).astype(np.uint8) * 255
+        center = _extract_ball_center(binary_mask)
+
+        if center is None:
+            results.append(TrackResult(
+                ball_xy=[-1.0, -1.0],
+                visible=0,
+                score=score,
+                heatmap_shape=list(heatmap.shape),
+            ))
+        else:
+            x, y = center
+            ball_xy = [x * meta.scale_x, y * meta.scale_y]
+            results.append(TrackResult(
+                ball_xy=ball_xy,
+                visible=1,
+                score=score,
+                heatmap_shape=list(heatmap.shape),
+            ))
+
+    return results

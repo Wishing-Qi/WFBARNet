@@ -9,8 +9,8 @@ import numpy as np
 import torch
 
 from src.models.tracknet_v3 import TrackNetV3
-from src.postprocess.track import decode_track_heatmap
-from src.preprocess.track import preprocess_track_window
+from src.postprocess.track import decode_track_heatmap, decode_track_heatmap_batch
+from src.preprocess.track import preprocess_track_window, preprocess_track_batch
 from src.utils.structures import TrackResult
 
 
@@ -49,3 +49,10 @@ class TrackBranch:
         heatmaps = self.model(tensor).detach().cpu().numpy()
         decoded = decode_track_heatmap(heatmaps, meta, self.score_thr)
         return heatmaps, decoded
+
+    @torch.no_grad()
+    def infer_batch(self, batch_frames: list[Sequence[np.ndarray]]) -> tuple[np.ndarray, list[TrackResult]]:
+        tensor, metas = preprocess_track_batch(batch_frames, self.input_size, self.device)
+        heatmaps = self.model(tensor).detach().cpu().numpy()
+        decoded_batch = decode_track_heatmap_batch(heatmaps, metas, self.score_thr)
+        return heatmaps, decoded_batch

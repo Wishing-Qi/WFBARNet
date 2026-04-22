@@ -1,0 +1,56 @@
+/* ============================================================
+ *  LAYOUT  —  卡片、容器框架
+ * ============================================================ */
+
+/* --- 通用卡片 --- */
+QFrame#headerCard,
+QFrame#previewCard,
+QFrame#analyticsCard,
+QFrame#metricCard,
+QFrame#emptyStateCard {
+    background-color: #FFFFFF;
+    border: 1px solid #E2E8F0;
+    border-radius: 6px;
+}
+
+/* previewCard 底部与 videoPlayerCard 无缝衔接 */
+QFrame#previewCard {
+    border-bottom: none;
+    border-bottom-left-radius: 0px;
+    border-bottom-right-radius: 0px;
+}
+
+/* headerCard 顶部品牌色强调线 */
+QFrame#headerCard {
+    border-top: 3px solid #0F6CBD;
+}
+
+QFrame#metricCard {
+    min-height: 80px;
+}
+
+/* --- 视频播放器容器 --- */
+QFrame#videoPlayerCard {
+    background-color: #FFFFFF;
+    border: 1px solid #E2E8F0;
+    border-radius: 6px;
+}
+
+QFrame#videoControlsBar {
+    background-color: #F8FAFC;
+    border: 1px solid #E2E8F0;
+    border-radius: 4px;
+    padding: 6px;
+}
+
+QWidget#timelineBar {
+    background: transparent;
+    border: none;
+    padding: 0px;
+}
+
+QFrame#videoTimelineCard {
+    background: transparent;
+    border: none;
+    padding: 0px;
+}

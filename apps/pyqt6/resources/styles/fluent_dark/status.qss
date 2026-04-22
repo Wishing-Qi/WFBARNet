@@ -1,0 +1,82 @@
+/* ============================================================
+ *  STATUS & LABELS  —  Fluent Dark
+ * ============================================================ */
+
+QLabel#titleLabel {
+    font-size: 28px;
+    font-weight: 600;
+    color: #E8EDF5;
+}
+
+QLabel#subtitleLabel { color: #8A95A8; }
+
+QLabel#sectionTitle {
+    font-size: 17px;
+    font-weight: 600;
+    color: #C8D0DC;
+}
+
+QLabel#hintText,
+QLabel#poseInfo { color: #8A95A8; }
+
+QLabel#metricTitle {
+    color: #8A95A8;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+QLabel#metricValue {
+    color: #4FA3E0;
+    font-size: 24px;
+    font-weight: 600;
+}
+
+QLabel#modeChip,
+QLabel#pipelineChip,
+QLabel#videoState,
+QLabel#sectionNote,
+QLabel#videoStatus {
+    background-color: #0F2040;
+    color: #4FA3E0;
+    border: 1px solid #1E3A5F;
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+QLabel#videoState[state="loaded"],
+QLabel#videoStatus[state="loaded"],
+QLabel#videoStatus[state="playing"] {
+    background-color: #0D2B1A;
+    color: #4ADE80;
+    border-color: #166534;
+}
+
+QLabel#videoStatus[state="stopped"] {
+    background-color: #2B1F0A;
+    color: #FCD34D;
+    border-color: #92400E;
+}
+
+QLabel#videoStatus[state="error"] {
+    background-color: #2B0F0F;
+    color: #F87171;
+    border-color: #7F1D1D;
+}
+
+QLabel#statusLabel {
+    color: #C8D0DC;
+    font-weight: 600;
+}
+
+QLabel#statusLabel[state="loading"] { color: #FCD34D; }
+QLabel#statusLabel[state="success"] { color: #4ADE80; }
+QLabel#statusLabel[state="stopped"] { color: #FCD34D; }
+QLabel#statusLabel[state="error"]   { color: #F87171; }
+
+QLabel#styleLabel {
+    color: #8A95A8;
+    font-size: 12px;
+    font-weight: 400;
+}

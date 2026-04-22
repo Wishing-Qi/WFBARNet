@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from threading import Thread
 from typing import Any
@@ -11,6 +12,15 @@ import numpy as np
 def _default_output_dir() -> str:
     project_root = Path(__file__).resolve().parents[3]
     return str(project_root / "outputs" / "desktop_gui")
+
+
+def _make_log_entry(level: str, message: str) -> str:
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    return f"[{timestamp}] [{level}] {message}"
+
+
+def _initial_logs() -> list[str]:
+    return [_make_log_entry("INFO", "图形界面已初始化。")]
 
 
 @dataclass
@@ -40,7 +50,7 @@ class GUIState:
     result_files: dict[str, str] = field(default_factory=dict)
 
     error_message: str = ""
-    logs: list[str] = field(default_factory=lambda: ["[INFO] 图形界面已初始化。"])
+    logs: list[str] = field(default_factory=_initial_logs)
     stop_requested: bool = False
     worker: Thread | None = None
 
@@ -77,7 +87,7 @@ class GUIState:
         self.status = "idle"
         self.task_progress = 0.0
         self.current_stage = "等待载入视频"
-        self.logs = ["[INFO] 图形界面状态已重置。"]
+        self.logs = [_make_log_entry("INFO", "图形界面状态已重置。")]
 
 
 gui_state = GUIState()

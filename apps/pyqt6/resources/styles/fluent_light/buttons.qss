@@ -1,0 +1,75 @@
+/* ============================================================
+ *  BUTTONS  —  QPushButton 全部变体
+ * ============================================================ */
+
+/* --- 默认按钮 --- */
+QPushButton {
+    min-height: 32px;
+    border-radius: 4px;
+    padding: 4px 12px;
+    font-size: 13px;
+    font-weight: 600;
+    border: 1px solid #CBD5E1;
+    background-color: #FFFFFF;
+    color: #0F172A;
+}
+
+QPushButton:hover    { background-color: #F8FAFC; border-color: #94A3B8; }
+QPushButton:pressed  { background-color: #F1F5F9; border-color: #94A3B8; }
+QPushButton:disabled { background-color: #F1F5F9; color: #94A3B8; border-color: #E2E8F0; }
+
+/* --- 上传按钮（白底） --- */
+QPushButton#btnUpload {
+    background-color: #FFFFFF;
+    color: #0F172A;
+}
+
+/* --- 小尺寸按钮组（header 区域） --- */
+QPushButton#btnAnalyze,
+QPushButton#btnReset,
+QPushButton#btnSelectVideo,
+QPushButton#btnForceStop {
+    min-height: 20px;
+    padding-top: 4px;
+    padding-bottom: 4px;
+}
+
+/* --- 开始分析（主色调） --- */
+QPushButton#btnAnalyze {
+    min-width: 68px;
+    background-color: #0F6CBD;
+    color: #FFFFFF;
+    border-color: #0F6CBD;
+}
+
+QPushButton#btnAnalyze:hover    { background-color: #005A9E; border-color: #005A9E; }
+QPushButton#btnAnalyze:disabled { background-color: #E2E8F0; color: #94A3B8; border-color: #E2E8F0; }
+
+/* --- 重置（危险色调） --- */
+QPushButton#btnReset {
+    min-width: 56px;
+    color: #D13438;
+    background-color: #FFFFFF;
+    border-color: #F5B0B3;
+}
+
+QPushButton#btnReset:hover   { background-color: #FDF3F4; border-color: #D13438; }
+QPushButton#btnReset:pressed { background-color: #FBE6E7; }
+
+/* --- 选择视频（白底） --- */
+QPushButton#btnSelectVideo {
+    min-width: 60px;
+    background-color: #FFFFFF;
+    color: #0F172A;
+}
+
+/* --- 强制停止（危险色调） --- */
+QPushButton#btnForceStop {
+    min-width: 76px;
+    color: #D13438;
+    background-color: #FFFFFF;
+    border-color: #F5B0B3;
+}
+
+QPushButton#btnForceStop:hover   { background-color: #FDF3F4; border-color: #D13438; }
+QPushButton#btnForceStop:pressed { background-color: #FBE6E7; }

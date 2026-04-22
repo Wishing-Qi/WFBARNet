@@ -1,0 +1,52 @@
+/* ============================================================
+ *  LAYOUT  —  Fluent Dark
+ * ============================================================ */
+
+QFrame#headerCard,
+QFrame#previewCard,
+QFrame#analyticsCard,
+QFrame#metricCard,
+QFrame#emptyStateCard {
+    background-color: #22262E;
+    border: 1px solid #3A3F4B;
+    border-radius: 6px;
+}
+
+QFrame#previewCard {
+    border-bottom: none;
+    border-bottom-left-radius: 0px;
+    border-bottom-right-radius: 0px;
+}
+
+QFrame#headerCard {
+    border-top: 3px solid #4FA3E0;
+}
+
+QFrame#metricCard {
+    min-height: 80px;
+}
+
+QFrame#videoPlayerCard {
+    background-color: #22262E;
+    border: 1px solid #3A3F4B;
+    border-radius: 6px;
+}
+
+QFrame#videoControlsBar {
+    background-color: #2A2F3A;
+    border: 1px solid #3A3F4B;
+    border-radius: 4px;
+    padding: 6px;
+}
+
+QWidget#timelineBar {
+    background: transparent;
+    border: none;
+    padding: 0px;
+}
+
+QFrame#videoTimelineCard {
+    background: transparent;
+    border: none;
+    padding: 0px;
+}

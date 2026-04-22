@@ -1,0 +1,52 @@
+/*
+ * ============================================================
+ *  DESIGN TOKENS  —  Fluent Dark
+ * ============================================================
+ *
+ *  Brand / Accent
+ *    --accent:          #4FA3E0
+ *    --accent-hover:    #6BB8F0
+ *    --accent-pressed:  #3A8FCC
+ *
+ *  Surface
+ *    --bg-app:          #1A1D23
+ *    --bg-card:         #22262E
+ *    --bg-subtle:       #2A2F3A
+ *    --bg-muted:        #313744
+ *
+ *  Border
+ *    --border-default:  #3A3F4B
+ *    --border-strong:   #4A5060
+ *    --border-muted:    #5A6070
+ *
+ *  Text
+ *    --text-primary:    #E8EDF5
+ *    --text-secondary:  #C8D0DC
+ *    --text-muted:      #8A95A8
+ *    --text-disabled:   #5A6070
+ *
+ *  Semantic — Success
+ *    --success-bg:      #0D2B1A
+ *    --success-text:    #4ADE80
+ *    --success-border:  #166534
+ *
+ *  Semantic — Warning
+ *    --warning-bg:      #2B1F0A
+ *    --warning-text:    #FCD34D
+ *    --warning-border:  #92400E
+ *
+ *  Semantic — Error
+ *    --error-bg:        #2B0F0F
+ *    --error-text:      #F87171
+ *    --error-border:    #7F1D1D
+ *    --error-accent:    #EF4444
+ *    --error-border-soft: #7F1D1D
+ *    --error-hover-bg:  #3B1515
+ *    --error-pressed-bg:#4B1A1A
+ *
+ *  Semantic — Info (chip / badge)
+ *    --info-bg:         #0F2040
+ *    --info-text:       #4FA3E0
+ *    --info-border:     #1E3A5F
+ * ============================================================
+ */

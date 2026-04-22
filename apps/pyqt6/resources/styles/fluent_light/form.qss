@@ -1,0 +1,87 @@
+/* ============================================================
+ *  FORM  —  QLineEdit / QComboBox / QProgressBar / QTextEdit
+ * ============================================================ */
+
+/* --- 进度条 --- */
+QProgressBar#topProgress,
+QProgressBar {
+    background-color: #E2E8F0;
+    border: none;
+    border-radius: 3px;
+    text-align: center;
+    color: #1E293B;
+    font-weight: 600;
+}
+
+QProgressBar::chunk {
+    background-color: #0F6CBD;
+    border-radius: 3px;
+}
+
+/* --- 文本输入框 --- */
+QLineEdit#videoPathEdit {
+    background-color: #FFFFFF;
+    border: 1px solid #CBD5E1;
+    border-radius: 4px;
+    color: #111827;
+    padding: 6px 10px;
+}
+
+QLineEdit#videoPathEdit:focus { border-color: #0F6CBD; }
+
+/* --- 主题切换按钮 --- */
+QToolButton#styleBtn {
+    background-color: #FFFFFF;
+    border: 1px solid #CBD5E1;
+    border-radius: 4px;
+    color: #0F172A;
+    padding: 0px 10px;
+    font-size: 13px;
+    font-weight: 500;
+    text-align: left;
+}
+
+QToolButton#styleBtn:hover {
+    background-color: #F8FAFC;
+    border-color: #94A3B8;
+}
+
+QToolButton#styleBtn:pressed,
+QToolButton#styleBtn[popupMode="1"]:pressed {
+    background-color: #F1F5F9;
+    border-color: #94A3B8;
+}
+
+QToolButton#styleBtn::menu-indicator {
+    image: none;
+    width: 0px;
+}
+
+QMenu#styleMenu {
+    background-color: #FFFFFF;
+    border: 1px solid #CBD5E1;
+    border-radius: 6px;
+    padding: 4px;
+}
+
+QMenu#styleMenu::item {
+    padding: 7px 14px;
+    border-radius: 4px;
+    color: #0F172A;
+    font-size: 13px;
+}
+
+QMenu#styleMenu::item:selected {
+    background-color: #EFF6FF;
+    color: #0F6CBD;
+}
+
+/* --- 日志控制台 --- */
+QTextEdit#logConsole {
+    background-color: #F8FAFC;
+    color: #1E293B;
+    border: 1px solid #E2E8F0;
+    border-radius: 4px;
+    padding: 8px;
+    font-family: Consolas, Monaco, "Courier New", monospace;
+}

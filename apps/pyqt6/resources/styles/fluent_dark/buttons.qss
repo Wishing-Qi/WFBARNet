@@ -1,0 +1,68 @@
+/* ============================================================
+ *  BUTTONS  —  Fluent Dark
+ * ============================================================ */
+
+QPushButton {
+    min-height: 32px;
+    border-radius: 4px;
+    padding: 4px 12px;
+    font-size: 13px;
+    font-weight: 600;
+    border: 1px solid #4A5060;
+    background-color: #2A2F3A;
+    color: #E8EDF5;
+}
+
+QPushButton:hover    { background-color: #313744; border-color: #5A6070; }
+QPushButton:pressed  { background-color: #22262E; border-color: #5A6070; }
+QPushButton:disabled { background-color: #22262E; color: #5A6070; border-color: #3A3F4B; }
+
+QPushButton#btnUpload {
+    background-color: #2A2F3A;
+    color: #E8EDF5;
+}
+
+QPushButton#btnAnalyze,
+QPushButton#btnReset,
+QPushButton#btnSelectVideo,
+QPushButton#btnForceStop {
+    min-height: 20px;
+    padding-top: 4px;
+    padding-bottom: 4px;
+}
+
+QPushButton#btnAnalyze {
+    min-width: 68px;
+    background-color: #4FA3E0;
+    color: #0F172A;
+    border-color: #4FA3E0;
+}
+
+QPushButton#btnAnalyze:hover    { background-color: #6BB8F0; border-color: #6BB8F0; }
+QPushButton#btnAnalyze:disabled { background-color: #3A3F4B; color: #5A6070; border-color: #3A3F4B; }
+
+QPushButton#btnReset {
+    min-width: 56px;
+    color: #F87171;
+    background-color: #2A2F3A;
+    border-color: #7F1D1D;
+}
+
+QPushButton#btnReset:hover   { background-color: #3B1515; border-color: #EF4444; }
+QPushButton#btnReset:pressed { background-color: #4B1A1A; }
+
+QPushButton#btnSelectVideo {
+    min-width: 60px;
+    background-color: #2A2F3A;
+    color: #E8EDF5;
+}
+
+QPushButton#btnForceStop {
+    min-width: 76px;
+    color: #F87171;
+    background-color: #2A2F3A;
+    border-color: #7F1D1D;
+}
+
+QPushButton#btnForceStop:hover   { background-color: #3B1515; border-color: #EF4444; }
+QPushButton#btnForceStop:pressed { background-color: #4B1A1A; }
