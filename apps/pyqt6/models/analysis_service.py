@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from itertools import cycle
@@ -14,6 +15,7 @@ import numpy as np
 from src.builders.bst_input_builder import BSTInputBuilder
 from src.models.pose_branch import PoseBranch
 from src.models.track_branch import TrackBranch
+from src.preprocess.track import preprocess_track_batch
 from src.utils.structures import FrameResult
 
 from apps.pyqt6.models.analysis_types import AnalysisAction, AnalysisResult
@@ -140,6 +142,12 @@ class AnalysisService:
             raise FileNotFoundError(f"视频文件不存在: {video_path}")
 
         self._emit(progress_callback, {"type": "stage", "stage": "正在准备模型和配置...", "progress": 0.02})
+
+        # 启用 cudnn benchmark（输入尺寸固定，可加速卷积）
+        import torch
+        if "cuda" in self.config.device:
+            torch.backends.cudnn.benchmark = True
+
         pose_branch = self._build_pose_branch()
         track_branch = self._build_track_branch()
 
@@ -154,7 +162,6 @@ class AnalysisService:
         resolved_output_dir.mkdir(parents=True, exist_ok=True)
 
         results: list[FrameResult] = []
-        # 可视化视频写入器（流式，避免二次遍历）
         vis_writer: cv2.VideoWriter | None = None
         vis_path: Path | None = None
         if self.config.save_vis:
@@ -180,16 +187,42 @@ class AnalysisService:
         count_denom = max(max_frames, 1) if max_frames > 0 else max(total_frames, 1)
         pose_stride = max(1, self.config.pose_stride)
         last_pose: list = []
+        last_progress_time = 0.0
+        PROGRESS_INTERVAL = 0.3  # 进度回调最小间隔（秒）
+
+        # 预处理线程池：在 GPU 推理当前 batch 时，CPU 预处理下一个 batch
+        preprocess_executor = ThreadPoolExecutor(max_workers=1)
+        pending_preprocess_future = None
+        input_size = track_branch.input_size
+        device = track_branch.device
+
+        def _preprocess_batch(windows):
+            """在后台线程中预处理一个 batch 的帧窗口为 tensor"""
+            return preprocess_track_batch(windows, input_size, device)
 
         def _flush_batch() -> None:
-            nonlocal last_pose
+            nonlocal last_pose, pending_preprocess_future, last_progress_time
             if not batch_frames:
                 return
-            _, track_results = track_branch.infer_batch(batch_windows)
+
+            # 如果有预处理好的 tensor，直接用；否则现场预处理
+            if pending_preprocess_future is not None:
+                tensor, metas = pending_preprocess_future.result()
+                pending_preprocess_future = None
+            else:
+                tensor, metas = preprocess_track_batch(batch_windows, input_size, device)
+
+            # Track 推理（FP16 已在 TrackBranch 内部处理）
+            from src.postprocess.track import decode_track_heatmap_batch
+            if track_branch._use_amp:
+                tensor = tensor.half()
+            with torch.no_grad():
+                heatmaps = track_branch.model(tensor).float().detach().cpu().numpy()
+            track_results = decode_track_heatmap_batch(heatmaps, metas, track_branch.score_thr)
+
             batch_start = frame_id - len(batch_frames)
             for i, (frame, track) in enumerate(zip(batch_frames, track_results)):
                 fid = batch_start + i
-                # 每 pose_stride 帧才做一次 pose 推理
                 if fid % pose_stride == 0:
                     last_pose = pose_branch.infer(frame)
                 fr = FrameResult(frame_id=fid, pose=last_pose, track=track)
@@ -197,21 +230,26 @@ class AnalysisService:
                 if vis_writer is not None:
                     from src.utils.visualize import draw_result
                     vis_writer.write(draw_result(frame, fr))
-            progress = min(frame_id / count_denom, 0.98)
-            self._emit(
-                progress_callback,
-                {
-                    "type": "frame",
-                    "stage": f"正在分析第 {frame_id}/{count_denom} 帧",
-                    "progress": progress,
-                    "frame_id": frame_id - 1,
-                    "track": {
-                        "ball_xy": track_results[-1].ball_xy,
-                        "visible": bool(track_results[-1].visible),
-                        "score": float(track_results[-1].score),
+
+            # 节流进度回调：最多每 PROGRESS_INTERVAL 秒发一次
+            now = time.perf_counter()
+            if now - last_progress_time >= PROGRESS_INTERVAL:
+                last_progress_time = now
+                progress = min(frame_id / count_denom, 0.98)
+                self._emit(
+                    progress_callback,
+                    {
+                        "type": "frame",
+                        "stage": f"正在分析第 {frame_id}/{count_denom} 帧",
+                        "progress": progress,
+                        "frame_id": frame_id - 1,
+                        "track": {
+                            "ball_xy": track_results[-1].ball_xy,
+                            "visible": bool(track_results[-1].visible),
+                            "score": float(track_results[-1].score),
+                        },
                     },
-                },
-            )
+                )
             batch_frames.clear()
             batch_windows.clear()
 
@@ -242,11 +280,17 @@ class AnalysisService:
                 frame_id += 1
 
                 if len(batch_frames) >= BATCH:
+                    # 提前提交预处理到后台线程（如果还没有 pending 的话）
+                    if pending_preprocess_future is None:
+                        pending_preprocess_future = preprocess_executor.submit(
+                            _preprocess_batch, list(batch_windows)
+                        )
                     _flush_batch()
 
-            _flush_batch()  # 处理剩余帧
+            _flush_batch()
         finally:
             cap.release()
+            preprocess_executor.shutdown(wait=False)
             if vis_writer is not None:
                 vis_writer.release()
 

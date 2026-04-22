@@ -22,7 +22,10 @@ class TrackBranch:
     score_thr: float = 0.5
 
     def __post_init__(self) -> None:
+        self._use_amp = "cuda" in self.device
         self.model = TrackNetV3().to(self.device).eval()
+        if self._use_amp:
+            self.model = self.model.half()
         if self.model_weight and Path(self.model_weight).exists():
             state = torch.load(self.model_weight, map_location=self.device)
             if isinstance(state, dict) and "model_state_dict" in state:
@@ -46,13 +49,17 @@ class TrackBranch:
     @torch.no_grad()
     def infer(self, frames: Sequence[np.ndarray]) -> tuple[np.ndarray, TrackResult]:
         tensor, meta = preprocess_track_window(frames, self.input_size, self.device)
-        heatmaps = self.model(tensor).detach().cpu().numpy()
+        if self._use_amp:
+            tensor = tensor.half()
+        heatmaps = self.model(tensor).float().detach().cpu().numpy()
         decoded = decode_track_heatmap(heatmaps, meta, self.score_thr)
         return heatmaps, decoded
 
     @torch.no_grad()
     def infer_batch(self, batch_frames: list[Sequence[np.ndarray]]) -> tuple[np.ndarray, list[TrackResult]]:
         tensor, metas = preprocess_track_batch(batch_frames, self.input_size, self.device)
-        heatmaps = self.model(tensor).detach().cpu().numpy()
+        if self._use_amp:
+            tensor = tensor.half()
+        heatmaps = self.model(tensor).float().detach().cpu().numpy()
         decoded_batch = decode_track_heatmap_batch(heatmaps, metas, self.score_thr)
         return heatmaps, decoded_batch

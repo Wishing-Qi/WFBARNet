@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, QUrl, pyqtSignal
-from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
-from PyQt6.QtMultimediaWidgets import QVideoWidget
+from PyQt6.QtGui import QImage, QPixmap
+from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame, QVideoSink
 from PyQt6.sip import isdeleted
 from PyQt6.QtWidgets import (
     QFrame,
@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
 
 
 class VideoPlayerWidget(QFrame):
-    """视频预览区，仅包含标题、状态和画面。"""
+    """视频预览区，使用 QVideoSink + QLabel 手动渲染，避免 WMF 黑屏。"""
 
     selectRequested = pyqtSignal()
     forceStopRequested = pyqtSignal()
@@ -53,6 +53,7 @@ class VideoPlayerWidget(QFrame):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
 
+        # 占位页
         placeholder_page = QWidget()
         placeholder_layout = QVBoxLayout(placeholder_page)
         placeholder_layout.setContentsMargins(0, 0, 0, 0)
@@ -65,20 +66,28 @@ class VideoPlayerWidget(QFrame):
 
         placeholder_layout.addWidget(placeholder_frame)
 
-        self.video_widget = QVideoWidget()
-        self.video_widget.setObjectName("videoOutput")
-        self.video_widget.setSizePolicy(
+        # 用 QLabel 替代 QVideoWidget，手动渲染视频帧
+        self.video_label = QLabel()
+        self.video_label.setObjectName("videoOutput")
+        self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.video_label.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored
         )
+        self.video_label.setStyleSheet("background-color: black;")
+
         self.preview_stack.addWidget(placeholder_page)
-        self.preview_stack.addWidget(self.video_widget)
+        self.preview_stack.addWidget(self.video_label)
         self.preview_stack.setCurrentWidget(placeholder_page)
 
+        # QMediaPlayer + QVideoSink（不再使用 QVideoWidget）
         self.player = QMediaPlayer(self)
         self.audio_output = QAudioOutput(self)
         self.audio_output.setVolume(0.0)
         self.player.setAudioOutput(self.audio_output)
-        self.player.setVideoOutput(self.video_widget)
+
+        self._video_sink = QVideoSink(self)
+        self.player.setVideoOutput(self._video_sink)
+        self._video_sink.videoFrameChanged.connect(self._on_video_frame)
 
         outer.addWidget(self.preview_stack, stretch=1)
 
@@ -86,20 +95,29 @@ class VideoPlayerWidget(QFrame):
         self.btn_force_stop.clicked.connect(self.forceStopRequested.emit)
 
         self.player.mediaStatusChanged.connect(self._on_media_status_changed)
-        self.player.playbackStateChanged.connect(self._on_playback_state_changed)
+
+    def _on_video_frame(self, frame: QVideoFrame) -> None:
+        """每收到一帧就转为 QPixmap 绘制到 QLabel 上。"""
+        if frame.isValid() and not isdeleted(self.video_label):
+            image = frame.toImage()
+            if not image.isNull():
+                pixmap = QPixmap.fromImage(image)
+                scaled = pixmap.scaled(
+                    self.video_label.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                self.video_label.setPixmap(scaled)
 
     def _set_status(self, text: str, state: str) -> None:
         pass  # state_label 已移除
 
     def _on_media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
         if status == QMediaPlayer.MediaStatus.LoadedMedia and self._source_path:
-            self.preview_stack.setCurrentWidget(self.video_widget)
-            # play 再 pause 让 WMF 后端渲染第一帧，否则黑屏
+            self.preview_stack.setCurrentWidget(self.video_label)
+            # play 再 pause 触发第一帧渲染
             self.player.play()
             self.player.pause()
-
-    def _on_playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
-        pass
 
     def set_video_path(self, path: str) -> None:
         self._source_path = path
@@ -114,13 +132,15 @@ class VideoPlayerWidget(QFrame):
             self.path_edit.setToolTip("")
         self.player.stop()
         self.player.setSource(QUrl())
+        if not isdeleted(self.video_label):
+            self.video_label.clear()
         if not isdeleted(self.preview_stack) and self.preview_stack.count() > 0:
             self.preview_stack.setCurrentWidget(self.preview_stack.widget(0))
         self._set_status("未加载视频", "idle")
 
     def play(self) -> None:
         if self._source_path and not isdeleted(self.preview_stack):
-            self.preview_stack.setCurrentWidget(self.video_widget)
+            self.preview_stack.setCurrentWidget(self.video_label)
             self.player.play()
 
     def pause(self) -> None:
@@ -159,35 +179,40 @@ class VideoTimelineWidget(QFrame):
         self._duration_ms = 0
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(12, 6, 12, 6)
         layout.setSpacing(10)
 
         self.seek_slider = QSlider(Qt.Orientation.Horizontal)
-        self.seek_slider.setObjectName("videoTimeline")
+        self.seek_slider.setObjectName("videoSeekSlider")
         self.seek_slider.setRange(0, 0)
-        self.seek_slider.setSingleStep(1000)
-        self.seek_slider.setPageStep(5000)
+        self.seek_slider.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
 
         self.time_label = QLabel("00:00 / 00:00")
-        self.time_label.setObjectName("timeLabel")
-        self.time_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.time_label.setObjectName("videoTimeLabel")
+        self.time_label.setFixedWidth(110)
+        self.time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        layout.addWidget(self.seek_slider, stretch=1)
+        layout.addWidget(self.seek_slider)
         layout.addWidget(self.time_label)
 
         self.seek_slider.sliderPressed.connect(self._on_slider_pressed)
         self.seek_slider.sliderReleased.connect(self._on_slider_released)
         self.seek_slider.sliderMoved.connect(self._on_slider_moved)
-        self._player.durationChanged.connect(self._on_duration_changed)
-        self._player.positionChanged.connect(self._on_position_changed)
 
-    def _format_time(self, milliseconds: int) -> str:
-        total_seconds = max(0, milliseconds // 1000)
-        minutes, seconds = divmod(total_seconds, 60)
-        hours, minutes = divmod(minutes, 60)
-        if hours:
-            return f"{hours:02}:{minutes:02}:{seconds:02}"
-        return f"{minutes:02}:{seconds:02}"
+        self._player.positionChanged.connect(self._on_position_changed)
+        self._player.durationChanged.connect(self._on_duration_changed)
+
+    def bind_player(self, player: QMediaPlayer) -> None:
+        self._player = player
+        self._player.positionChanged.connect(self._on_position_changed)
+        self._player.durationChanged.connect(self._on_duration_changed)
+
+    @staticmethod
+    def _format_time(ms: int) -> str:
+        total_sec = max(0, ms) // 1000
+        return f"{total_sec // 60:02d}:{total_sec % 60:02d}"
 
     def _on_slider_pressed(self) -> None:
         self._dragging = True
