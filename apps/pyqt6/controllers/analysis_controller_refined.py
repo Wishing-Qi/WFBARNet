@@ -1,20 +1,21 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Thread
 
 import cv2
+import numpy as np
 from PyQt6.QtCore import QThread, QTimer, pyqtSignal
-from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox
+from PyQt6.QtWidgets import QApplication, QFileDialog
+from PyQt6.sip import isdeleted
 
-from apps.pyqt6.models.analysis_service import AnalysisService
-from apps.pyqt6.models.analysis_types import AnalysisResult
 from apps.pyqt6.utils.style import apply_theme, discover_themes
 from apps.pyqt6.views.main_window_refined import MainWindow
 
 
 class ProbeWorker(QThread):
     """后台探测视频元数据，避免主线程阻塞。"""
-    finished = pyqtSignal(str, dict)  # (file_path, metadata)
+    finished = pyqtSignal(str, dict)
 
     def __init__(self, file_path: str) -> None:
         super().__init__()
@@ -32,88 +33,52 @@ class ProbeWorker(QThread):
         self.finished.emit(self._file_path, {"fps": fps, "width": width, "height": height})
 
 
-class AnalysisWorker(QThread):
-    progress_payload = pyqtSignal(object)
-    finished_with_result = pyqtSignal(object)
-    failed = pyqtSignal(str)
-
-    def __init__(self, service: AnalysisService, video_path: str) -> None:
-        super().__init__()
-        self._service = service
-        self._video_path = video_path
-        self._stop_requested = False
-
-    def request_stop(self) -> None:
-        self._stop_requested = True
-
-    def run(self) -> None:
-        try:
-            result = self._service.analyze_video(
-                self._video_path,
-                progress_callback=lambda payload: self.progress_payload.emit(payload),
-                stop_requested=lambda: self._stop_requested,
-            )
-            if self._stop_requested:
-                result.status = "stopped"
-                result.message = "分析已中止"
-            self.finished_with_result.emit(result)
-        except Exception as exc:  # pragma: no cover - UI error path
-            self.failed.emit(str(exc))
-
-
 class MainController:
-    """控制层：连接视频选择、强制停止、分析线程和结果回填。"""
+    """控制层：连接视频选择、TrackNet 推理和结果显示。"""
 
     def __init__(self, view: MainWindow) -> None:
         self.view = view
-        self.service = AnalysisService()
         self._selected_video_path: str | None = None
-        self._worker: AnalysisWorker | None = None
         self._probe_worker: ProbeWorker | None = None
         self._theme_dirs = discover_themes()
+        self._track_branch = None
+        self._track_running = False
 
+        self._init_tracknet()
         self._bind_events()
         self.view.populate_stylesheets(self._theme_dirs)
         self._set_idle_state()
-        self.view.append_log(f"[System] 界面已初始化，推理设备: {self.service.config.device}")
+        self.view.append_log(f"[System] 界面已初始化")
+
+    def _init_tracknet(self) -> None:
+        from src.models.track_branch import TrackBranch
+        project_root = Path(__file__).resolve().parents[3]
+        model_weight = str(project_root / "assets" / "weights" / "track" / "model_best.pt")
+        self._track_branch = TrackBranch(
+            model_weight=model_weight,
+            device="cuda:0" if cv2.cuda.getCudaEnabledDeviceCount() > 0 else "cpu",
+            input_size=(512, 288),
+            score_thr=0.35,
+        )
+        self.view.append_log(f"[TrackNet] 模型已加载")
 
     def _bind_events(self) -> None:
-        self.view.btn_analyze.clicked.connect(self.handle_analyze)
-        self.view.btn_reset.clicked.connect(self.handle_reset)
         self.view.video_player.selectRequested.connect(self.handle_upload)
         self.view.video_player.forceStopRequested.connect(self.handle_force_stop)
         self.view._style_menu.triggered.connect(self._on_style_action_triggered)
 
     def _set_idle_state(self) -> None:
-        self.view.btn_analyze.setEnabled(self._selected_video_path is not None)
-        self.view.btn_reset.setEnabled(True)
         self.view.video_player.btn_select_video.setEnabled(True)
         self.view.video_player.btn_force_stop.setEnabled(True)
         self.view.set_status_state("idle")
 
     def _set_running_state(self) -> None:
-        self.view.btn_analyze.setEnabled(False)
-        self.view.btn_reset.setEnabled(True)
         self.view.video_player.btn_select_video.setEnabled(False)
         self.view.video_player.btn_force_stop.setEnabled(True)
         self.view.set_status_state("loading")
 
-    def _set_success_state(self) -> None:
-        self.view.btn_analyze.setEnabled(self._selected_video_path is not None)
-        self.view.btn_reset.setEnabled(True)
-        self.view.video_player.btn_select_video.setEnabled(True)
-        self.view.video_player.btn_force_stop.setEnabled(True)
-        self.view.set_status_state("success")
-
-    def _set_stopped_state(self) -> None:
-        self.view.btn_analyze.setEnabled(self._selected_video_path is not None)
-        self.view.btn_reset.setEnabled(True)
-        self.view.video_player.btn_select_video.setEnabled(True)
-        self.view.video_player.btn_force_stop.setEnabled(True)
-        self.view.set_status_state("stopped")
-
     def handle_upload(self) -> None:
-        start_dir = str(self.service.project_root / "videos")
+        start_dir = str(Path(__file__).resolve().parents[3] / "videos")
         file_path, _ = QFileDialog.getOpenFileName(
             self.view,
             "选择比赛视频",
@@ -128,15 +93,16 @@ class MainController:
         self.view.set_video_path(file_path)
         self.view.append_log(f"[Info] 正在读取视频信息: {Path(file_path).name}")
 
-        # 后台探测元数据，不阻塞主线程
         self._probe_worker = ProbeWorker(file_path)
         self._probe_worker.finished.connect(self._on_probe_finished)
         self._probe_worker.start()
 
+        self._start_tracknet_inference(file_path)
+
     def _on_probe_finished(self, file_path: str, metadata: dict) -> None:
         self._probe_worker = None
         if file_path != self._selected_video_path:
-            return  # 用户已切换到其他视频
+            return
         file_name = Path(file_path).name
         resolution = (
             f"{metadata['width']} x {metadata['height']}"
@@ -144,127 +110,106 @@ class MainController:
             else "分辨率未知"
         )
         self.view.set_video_state("loaded")
-        self.view.btn_analyze.setEnabled(True)
         self.view.append_log(
-            f"[Info] 成功加载本地视频: {file_name} | {resolution} | FPS {metadata['fps']:.2f}"
+            f"[Info] 成功加载视频: {file_name} | {resolution} | FPS {metadata['fps']:.2f}"
         )
 
-    def handle_analyze(self) -> None:
-        if not self._selected_video_path:
-            default_path = self.service.project_root / "videos" / "sample.mp4"
-            if default_path.exists():
-                self._selected_video_path = str(default_path)
-                self.view.set_video_path(str(default_path))
-                self.view.set_video_state("loaded")
-                self.view.append_log("[Info] 未选择视频，已自动使用示例视频 sample.mp4。")
-            else:
-                self.view.append_log("[Warn] 请先选择一个视频文件，再开始分析。")
-                QMessageBox.warning(self.view, "未选择视频", "请先选择一个视频文件，再开始分析。")
+    def _start_tracknet_inference(self, video_path: str) -> None:
+        if self._track_branch is None:
+            self.view.append_log("[Error] TrackNet 模型未初始化")
+            return
+
+        if self._track_running:
+            self.view.append_log("[Info] TrackNet 推理正在进行中...")
+            self._track_running = False
+
+        self._track_running = True
+        self._set_running_state()
+        self.view.append_log(f"[TrackNet] 开始推理: {Path(video_path).name}")
+        self._run_tracknet_thread(video_path)
+
+    def _run_tracknet_thread(self, video_path: str) -> None:
+        def tracknet_loop():
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                self.view.append_log(f"[Error] 无法打开视频: {video_path}")
+                self._track_running = False
                 return
 
-        if self._worker is not None and self._worker.isRunning():
-            self.view.append_log("[Warn] 当前已有分析任务在运行。")
-            return
+            ok, first_frame = cap.read()
+            if not ok:
+                self.view.append_log("[Error] 无法读取视频帧")
+                cap.release()
+                self._track_running = False
+                return
 
-        self._set_running_state()
-        self.view.video_player.pause()
-        self.view.tabs.setCurrentIndex(0)
-        self.view.append_log("[System] 分析任务已启动。")
+            ok, second_frame = cap.read()
+            if not ok:
+                second_frame = first_frame.copy()
 
-        self._worker = AnalysisWorker(self.service, self._selected_video_path)
-        self._worker.progress_payload.connect(self._handle_progress_payload)
-        self._worker.finished_with_result.connect(self._handle_analysis_finished)
-        self._worker.failed.connect(self._handle_analysis_failed)
-        self._worker.start()
+            prev_frame = first_frame.copy()
+            curr_frame = first_frame
+            next_frame = second_frame
+            tick_frequency = cv2.getTickCount()
+            ema_fps = 0.0
+
+            while self._track_running:
+                if isdeleted(self.view):
+                    break
+
+                start_tick = cv2.getTickCount()
+                _, track = self._track_branch.infer([prev_frame, curr_frame, next_frame])
+                end_tick = cv2.getTickCount()
+                elapsed = max((end_tick - start_tick) / tick_frequency, 1e-6)
+                instant_fps = 1.0 / elapsed
+                ema_fps = instant_fps if ema_fps == 0.0 else 0.9 * ema_fps + 0.1 * instant_fps
+
+                if not isdeleted(self.view):
+                    frame_copy = curr_frame.copy()
+                    QTimer.singleShot(0, lambda f=frame_copy, t=track, fps=ema_fps:
+                                   self.view.update_tracknet_frame(f, t, fps))
+
+                prev_frame = curr_frame
+                curr_frame = next_frame
+                ok, incoming = cap.read()
+                if not ok:
+                    break
+                next_frame = incoming
+
+            cap.release()
+            self._track_running = False
+            if not isdeleted(self.view):
+                QTimer.singleShot(0, lambda: (
+                    self.view.append_log("[TrackNet] 推理完成"),
+                    self._set_idle_state()
+                ))
+
+        thread = Thread(target=tracknet_loop, daemon=True)
+        thread.start()
 
     def handle_force_stop(self) -> None:
-        if self._worker is not None:
-            if self._worker.isRunning():
-                self.view.append_log("[Warn] 正在停止分析任务...")
-                self._worker.request_stop()
-                self._worker.wait(1000)
-                if self._worker.isRunning():
-                    self._worker.quit()
-                    self._worker.wait(500)
-                self.view.append_log("[System] 分析任务已停止。")
-            self._worker = None
+        if self._track_running:
+            self.view.append_log("[Info] 正在停止 TrackNet 推理...")
+            self._track_running = False
+            self._set_idle_state()
         else:
-            self.view.append_log("[System] 视频预览已暂停。")
+            self.view.append_log("[Info] 视频预览已暂停。")
 
         self.view.video_player.pause()
-        self._set_stopped_state()
-
-    def _handle_progress_payload(self, payload: object) -> None:
-        if not isinstance(payload, dict):
-            return
-        stage = str(payload.get("stage", ""))
-        progress = float(payload.get("progress", 0.0))
-        self.view.update_progress(max(0, min(int(progress * 100), 100)))
-        if stage:
-            self.view.status_label.setText(f"系统状态：{stage}")
-            self.view.append_log(f"[Progress] {stage}")
-
-    def _handle_analysis_finished(self, result: object) -> None:
-        analysis_result = AnalysisResult.from_payload(result)
-        self._worker = None
-
-        if analysis_result.status == "success":
-            self._render_analysis_result(analysis_result)
-            self.view.update_progress(100)
-            self._set_success_state()
-            self.view.status_label.setText("系统状态：分析完成")
-            self.view.append_log(f"[Success] {analysis_result.message}")
-            return
-
-        self._set_stopped_state()
-        self.view.status_label.setText("系统状态：已中止")
-        self.view.append_log(f"[Warn] {analysis_result.message}")
-
-    def _handle_analysis_failed(self, error_message: str) -> None:
-        self._worker = None
-        self._set_stopped_state()
-        self.view.set_status_state("error")
-        self.view.status_label.setText("系统状态：分析失败")
-        self.view.append_log(f"[Error] {error_message}")
-        QMessageBox.critical(self.view, "分析失败", error_message)
-
-    def _render_analysis_result(self, result: AnalysisResult) -> None:
-        self.view.tabs.setCurrentIndex(0)
-        self.view.lbl_total_actions.setText(str(result.action_count))
-        self.view.lbl_avg_conf.setText(f"{result.avg_confidence * 100:.1f}%")
-        self.view.lbl_valid_pose.setText(str(result.valid_pose_frames))
-        self.view.lbl_valid_track.setText(str(result.valid_track_frames))
-
-        self.view.table_actions.setRowCount(0)
-        for action in result.actions:
-            self.view.add_action_row(action.time_range, action.label, action.confidence, action.detail)
-
-        self.view.append_log(f"[Info] 输出目录: {result.output_dir}")
-        for name, path in result.output_files.items():
-            self.view.append_log(f"[File] {name}: {path}")
-        self.view.append_log(result.to_display_text())
 
     def handle_reset(self) -> None:
-        if self._worker is not None:
-            if self._worker.isRunning():
-                self.view.append_log("[Warn] 正在停止当前任务...")
-                self._worker.request_stop()
-                self._worker.wait(1000)
-                if self._worker.isRunning():
-                    self._worker.quit()
-                    self._worker.wait(500)
-            self._worker = None
-
         if self._probe_worker is not None:
             if self._probe_worker.isRunning():
                 self._probe_worker.quit()
                 self._probe_worker.wait(500)
             self._probe_worker = None
 
+        if self._track_running:
+            self._track_running = False
+            self.view.append_log("[TrackNet] 推理已停止")
+
         self._selected_video_path = None
         self.view.clear_video()
-        self.view.video_timeline.reset()
-        self.view.reset_analysis()
         self.view.log_console.clear()
         self.view.append_log("[System] 工作区已重置。")
         self._set_idle_state()
@@ -292,16 +237,6 @@ class MainController:
             self.view.append_log(f"[Theme] 已切换主题: {theme_dir.name}")
 
         QTimer.singleShot(0, _apply)
-
-    def _probe_video_metadata(self, file_path: str) -> dict[str, float | int]:
-        cap = cv2.VideoCapture(file_path)
-        if not cap.isOpened():
-            return {"fps": 0.0, "width": 0, "height": 0}
-        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-        cap.release()
-        return {"fps": fps, "width": width, "height": height}
 
 
 MockController = MainController

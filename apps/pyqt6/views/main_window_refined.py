@@ -114,21 +114,12 @@ class MainWindow(QMainWindow):
         button_row.addWidget(self.btn_analyze)
         button_row.addWidget(self.btn_reset)
 
-        status_row = QHBoxLayout()
-        status_row.setSpacing(12)
+        actions_col.addLayout(button_row)
+
         self.status_label = QLabel("系统状态：待机中")
         self.status_label.setObjectName("statusLabel")
         self.status_label.setProperty("state", "idle")
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setObjectName("topProgress")
-        self.progress_bar.setValue(0)
-        self.progress_bar.setTextVisible(True)
-        self.progress_bar.setFixedHeight(16)
-        status_row.addWidget(self.status_label, stretch=0)
-        status_row.addWidget(self.progress_bar, stretch=1)
-
-        actions_col.addLayout(button_row)
-        actions_col.addLayout(status_row)
+        brand_col.addWidget(self.status_label)
 
         header_layout.addLayout(brand_col, stretch=1)
         header_layout.addLayout(actions_col, stretch=0)
@@ -172,8 +163,14 @@ class MainWindow(QMainWindow):
         preview_header.addWidget(preview_title)
         preview_header.addStretch(1)
 
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setObjectName("topProgress")
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFixedHeight(16)
+
         self.video_player = VideoPlayerWidget()
-        self.video_player.setMinimumHeight(540)
+        self.video_player.setMinimumHeight(360)
 
         video_controls = QFrame()
         video_controls.setObjectName("videoControlsBar")
@@ -197,6 +194,7 @@ class MainWindow(QMainWindow):
         timeline_bar_layout.addWidget(self.video_timeline)
 
         preview_layout.addLayout(preview_header)
+        preview_layout.addWidget(self.progress_bar)
         preview_layout.addWidget(video_controls, 0)
         preview_layout.addWidget(self.video_player, 0)
         # preview_layout.addWidget(timeline_bar, 0)
