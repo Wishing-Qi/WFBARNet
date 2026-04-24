@@ -25,10 +25,49 @@ QPushButton#btnUpload {
 QPushButton#btnAnalyze,
 QPushButton#btnReset,
 QPushButton#btnSelectVideo,
-QPushButton#btnForceStop {
+QPushButton#btnForceStop,
+QPushButton#btnPreviewMode,
+QPushButton#btnCameraMode,
+QPushButton#btnRefreshCameras {
     min-height: 20px;
     padding-top: 4px;
     padding-bottom: 4px;
+}
+
+QPushButton#btnPreviewMode,
+QPushButton#btnCameraMode {
+    min-width: 88px;
+    color: #8A95A8;
+    background-color: #2A2F3A;
+    border-color: #3A3F4B;
+    border-bottom: none;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+    border-bottom-left-radius: 0px;
+    border-bottom-right-radius: 0px;
+    padding: 8px 16px;
+    font-weight: 500;
+}
+
+QPushButton#btnPreviewMode:checked,
+QPushButton#btnCameraMode:checked {
+    color: #4FA3E0;
+    background-color: #22262E;
+    border-color: #3A3F4B;
+    border-bottom: 2px solid #4FA3E0;
+    font-weight: 600;
+}
+
+QPushButton#btnPreviewMode:hover:!checked,
+QPushButton#btnCameraMode:hover:!checked {
+    color: #E8EDF5;
+    background-color: #313744;
+}
+
+QPushButton#btnRefreshCameras {
+    min-width: 72px;
+    color: #E8EDF5;
+    background-color: #2A2F3A;
 }
 
 QPushButton#btnAnalyze {

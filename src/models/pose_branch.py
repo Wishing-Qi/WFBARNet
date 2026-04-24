@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from src.models.mmpose_backend import MMPoseBackend
+from src.models.yolo_pose_backend import YoloPoseBackend
 from src.postprocess.pose import build_pose_result
 from src.preprocess.pose import preprocess_pose_frame
 from src.utils.device import resolve_device
@@ -26,19 +27,33 @@ class PoseBranch:
 
     def __post_init__(self) -> None:
         self.device = resolve_device(self.device)
-        backend = self.backend.strip().lower()
-        if backend not in {"mmpose", "dummy"}:
-            raise ValueError(f"Unsupported pose backend: {self.backend!r}. Supported values are 'mmpose' and 'dummy'.")
-        self.backend_impl = MMPoseBackend(
-            model_config=self.model_config,
-            model_weight=self.model_weight,
-            device=self.device,
-            bbox_mode=self.bbox_mode,
-            det_config=self.det_config,
-            det_weight=self.det_weight,
-            conf_thr=self.conf_thr,
-            max_persons=self.max_persons,
-            allow_dummy=backend == "dummy",
+        self.backend_name = self.backend.strip().lower().replace("_", "-")
+        if self.backend_name in {"mmpose", "dummy"}:
+            self.backend_impl = MMPoseBackend(
+                model_config=self.model_config,
+                model_weight=self.model_weight,
+                device=self.device,
+                bbox_mode=self.bbox_mode,
+                det_config=self.det_config,
+                det_weight=self.det_weight,
+                conf_thr=self.conf_thr,
+                max_persons=self.max_persons,
+                allow_dummy=self.backend_name == "dummy",
+            )
+            return
+
+        if self.backend_name in {"yolo26s-pose", "yolo-pose", "ultralytics", "ultralytics-pose"}:
+            self.backend_impl = YoloPoseBackend(
+                model_weight=self.model_weight,
+                device=self.device,
+                conf_thr=self.conf_thr,
+                max_persons=self.max_persons,
+            )
+            return
+
+        raise ValueError(
+            f"Unsupported pose backend: {self.backend!r}. "
+            "Supported values are 'mmpose', 'dummy', and 'yolo26s-pose'."
         )
 
     def infer(self, image: np.ndarray) -> list[PersonPoseResult]:

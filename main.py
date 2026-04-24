@@ -27,11 +27,9 @@ class RuntimeConfig:
     save_csv: bool = True
     save_npy: bool = True
     save_vis: bool = True
-    pose_backend: str = "mmpose"
-    pose_config: str = str(
-        PROJECT_ROOT / "tools" / "mmpose" / "configs" / "rtmpose-s_8xb256-420e_coco-256x192.py"
-    )
-    pose_weight: str = str(PROJECT_ROOT / "assets" / "weights" / "pose" / "rtmpose-s_8xb256-420e_coco-256x192.pth")
+    pose_backend: str = "yolo26s-pose"
+    pose_config: str = ""
+    pose_weight: str = str(PROJECT_ROOT / "assets" / "weights" / "pose" / "yolo26s-pose.pt")
     pose_bbox_mode: str = "whole_image"
     pose_det_config: Optional[str] = None
     pose_det_weight: Optional[str] = None

@@ -14,7 +14,7 @@ from src.postprocess.track_filter import BallTrackFilter
 from src.utils.exporters import export_csv, export_json, export_npy
 from src.utils.structures import FrameResult
 from src.utils.video import iter_frame_windows, iter_video_frame_windows, load_frames, probe_video
-from src.utils.visualize import draw_result, save_visualization_video
+from src.utils.visualize import TrackTrailRenderer, save_visualization_video
 
 
 @dataclass
@@ -84,6 +84,7 @@ class UnifiedRunner:
     def _run_video_stream(self, source: str, save_vis: bool) -> list[FrameResult]:
         metadata = probe_video(source)
         track_filter = BallTrackFilter(fps=metadata.fps)
+        trail_renderer = TrackTrailRenderer(fps=metadata.fps, history_seconds=3.0)
         writer = None
         if save_vis:
             writer = cv2.VideoWriter(
@@ -107,7 +108,7 @@ class UnifiedRunner:
                 result = FrameResult(frame_id=frame_id, pose=pose, track=track)
                 outputs.append(result)
                 if writer is not None:
-                    writer.write(draw_result(frame, result))
+                    writer.write(trail_renderer.draw(frame, result))
         finally:
             if writer is not None:
                 writer.release()

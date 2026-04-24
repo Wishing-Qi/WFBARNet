@@ -34,9 +34,9 @@ class AnalysisConfig:
     output_dir: str = "outputs/pyqt6"
     device: str = "cpu"
     execution_mode: str = "serial"
-    pose_backend: str = "mmpose"
-    pose_config: str = "tools/mmpose/configs/rtmpose-s_8xb256-420e_coco-256x192.py"
-    pose_weight: str = "assets/weights/pose/rtmpose-s_8xb256-420e_coco-256x192.pth"
+    pose_backend: str = "yolo26s-pose"
+    pose_config: str = ""
+    pose_weight: str = "assets/weights/pose/yolo26s-pose.pt"
     pose_bbox_mode: str = "whole_image"
     track_weight: str = "assets/weights/track/model_best.pt"
     save_json: bool = True
@@ -170,6 +170,11 @@ class AnalysisService:
                 vis_writer = cv2.VideoWriter(
                     str(vis_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h)
                 )
+        trail_renderer = None
+        if vis_writer is not None:
+            from src.utils.visualize import TrackTrailRenderer
+
+            trail_renderer = TrackTrailRenderer(fps=fps, history_seconds=3.0)
 
         start_time = time.perf_counter()
 
@@ -224,9 +229,8 @@ class AnalysisService:
                     last_pose = pose_branch.infer(frame)
                 fr = FrameResult(frame_id=fid, pose=last_pose, track=track)
                 results.append(fr)
-                if vis_writer is not None:
-                    from src.utils.visualize import draw_result
-                    vis_writer.write(draw_result(frame, fr))
+                if vis_writer is not None and trail_renderer is not None:
+                    vis_writer.write(trail_renderer.draw(frame, fr))
 
             # 节流进度回调：最多每 PROGRESS_INTERVAL 秒发一次
             now = time.perf_counter()

@@ -18,9 +18,9 @@ USER_CONFIG = RuntimeConfig(
     source=r"videos/test3.mp4",  # 修改为您的视频路径
     output_dir=str(PROJECT_ROOT / "outputs" / "pose_only"),  # 输出目录
     device="cpu",  # 或 "cuda:0" 使用 GPU
-    pose_backend="mmpose",  # "mmpose" | "ultralytics_compat" | "dummy"
-    pose_config=str(PROJECT_ROOT / "tools" / "mmpose" / "configs" / "rtmpose-s_8xb256-420e_coco-256x192.py"),
-    pose_weight=str(PROJECT_ROOT / "assets" / "weights" / "pose" / "rtmpose-s_8xb256-420e_coco-256x192.pth"),
+    pose_backend="yolo26s-pose",  # "yolo26s-pose" | "mmpose" | "dummy"
+    pose_config="",
+    pose_weight=str(PROJECT_ROOT / "assets" / "weights" / "pose" / "yolo26s-pose.pt"),
     pose_bbox_mode="whole_image",  # "whole_image" | "split_two" | "detector"
 )
 # ========================================

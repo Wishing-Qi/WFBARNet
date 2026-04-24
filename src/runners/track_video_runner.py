@@ -11,7 +11,7 @@ from src.postprocess.track_filter import BallTrackFilter
 from src.utils.exporters import export_csv, export_json, export_npy
 from src.utils.structures import FrameResult
 from src.utils.video import iter_frame_windows, iter_video_frame_windows, load_frames, probe_video
-from src.utils.visualize import draw_result, save_visualization_video
+from src.utils.visualize import TrackTrailRenderer, save_visualization_video
 
 
 @dataclass
@@ -96,6 +96,7 @@ class TrackVideoRunner:
 
         results: list[FrameResult] = []
         track_filter = BallTrackFilter(fps=metadata.fps)
+        trail_renderer = TrackTrailRenderer(fps=metadata.fps, history_seconds=3.0)
         progress_total = metadata.frame_count if metadata.frame_count > 0 else None
         if max_frames is not None:
             progress_total = min(progress_total, max_frames) if progress_total is not None else max_frames
@@ -107,7 +108,7 @@ class TrackVideoRunner:
                 result = FrameResult(frame_id=frame_id, pose=[], track=track)
                 results.append(result)
                 if writer is not None:
-                    writer.write(draw_result(curr_frame, result))
+                    writer.write(trail_renderer.draw(curr_frame, result))
                 progress.update(1)
         finally:
             progress.close()

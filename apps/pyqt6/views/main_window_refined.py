@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMenu,
+    QComboBox,
     QSizePolicy,
     QPushButton,
     QProgressBar,
@@ -147,6 +148,15 @@ class MainWindow(QMainWindow):
         self.root_layout.addLayout(body_layout, stretch=1)
 
     def _build_preview_panel(self, body_layout: QHBoxLayout) -> None:
+        preview_shell = QWidget()
+        preview_shell.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        preview_shell_layout = QVBoxLayout(preview_shell)
+        preview_shell_layout.setContentsMargins(0, 0, 0, 0)
+        preview_shell_layout.setSpacing(0)
+
         preview_panel = QFrame()
         preview_panel.setObjectName("previewCard")
         preview_panel.setSizePolicy(
@@ -158,9 +168,19 @@ class MainWindow(QMainWindow):
         preview_layout.setSpacing(14)
 
         preview_header = QHBoxLayout()
-        preview_title = QLabel("视频预览")
-        preview_title.setObjectName("sectionTitle")
-        preview_header.addWidget(preview_title)
+        preview_header.setSpacing(2)
+
+        self.btn_preview_mode = QPushButton("视频预览")
+        self.btn_preview_mode.setObjectName("btnPreviewMode")
+        self.btn_preview_mode.setCheckable(True)
+        self.btn_preview_mode.setChecked(True)
+
+        self.btn_camera_mode = QPushButton("摄像头实时推理")
+        self.btn_camera_mode.setObjectName("btnCameraMode")
+        self.btn_camera_mode.setCheckable(True)
+
+        preview_header.addWidget(self.btn_preview_mode)
+        preview_header.addWidget(self.btn_camera_mode)
         preview_header.addStretch(1)
 
         self.progress_bar = QProgressBar()
@@ -179,6 +199,17 @@ class MainWindow(QMainWindow):
         controls_layout.setSpacing(8)
         controls_layout.addWidget(self.video_player.btn_select_video)
         controls_layout.addWidget(self.video_player.path_edit, stretch=1)
+        self.camera_device_combo = QComboBox()
+        self.camera_device_combo.setObjectName("cameraDeviceCombo")
+        self.camera_device_combo.setMinimumWidth(220)
+        self.camera_device_combo.setVisible(False)
+
+        self.btn_refresh_cameras = QPushButton("刷新设备")
+        self.btn_refresh_cameras.setObjectName("btnRefreshCameras")
+        self.btn_refresh_cameras.setVisible(False)
+
+        controls_layout.addWidget(self.camera_device_combo)
+        controls_layout.addWidget(self.btn_refresh_cameras)
         controls_layout.addWidget(self.video_player.btn_force_stop)
 
         self.video_timeline = VideoTimelineWidget()
@@ -192,13 +223,15 @@ class MainWindow(QMainWindow):
         timeline_bar_layout.setSpacing(0)
         timeline_bar_layout.addWidget(self.video_timeline)
 
-        preview_layout.addLayout(preview_header)
         preview_layout.addWidget(self.progress_bar)
         preview_layout.addWidget(video_controls, 0)
         preview_layout.addWidget(self.video_player, 1)
         preview_layout.addWidget(timeline_bar, 0)
 
-        body_layout.addWidget(preview_panel, stretch=6)
+        preview_shell_layout.addLayout(preview_header)
+        preview_shell_layout.addWidget(preview_panel, stretch=1)
+
+        body_layout.addWidget(preview_shell, stretch=6)
 
     def _build_analytics_panel(self, body_layout: QHBoxLayout) -> None:
         analytics_panel = QFrame()
@@ -326,6 +359,31 @@ class MainWindow(QMainWindow):
     def set_video_path(self, path: str) -> None:
         self.video_player.set_video_path(path)
 
+    def set_input_mode(self, mode: str) -> None:
+        is_camera = mode == "camera"
+        self.btn_preview_mode.setChecked(not is_camera)
+        self.btn_camera_mode.setChecked(is_camera)
+        self.video_player.btn_select_video.setVisible(not is_camera)
+        self.video_player.path_edit.setVisible(not is_camera)
+        self.camera_device_combo.setVisible(is_camera)
+        self.btn_refresh_cameras.setVisible(is_camera)
+        self.video_timeline.setVisible(not is_camera)
+        self.btn_analyze.setText("开始推理" if is_camera else "开始分析")
+        if is_camera:
+            self.video_player.path_edit.clear()
+
+    def set_camera_devices(self, devices: list[tuple[int, str]]) -> None:
+        self.camera_device_combo.blockSignals(True)
+        self.camera_device_combo.clear()
+        for device_id, label in devices:
+            self.camera_device_combo.addItem(label, device_id)
+        self.camera_device_combo.blockSignals(False)
+
+    def selected_camera_device(self) -> int | None:
+        if self.camera_device_combo.count() <= 0:
+            return None
+        return int(self.camera_device_combo.currentData())
+
     def show_video_frame(self, image, position_ms: int, duration_ms: int) -> None:
         self.video_player.display_image(image)
         self.video_timeline.set_duration(duration_ms)
@@ -346,7 +404,18 @@ class MainWindow(QMainWindow):
         self.log_console.append(text)
 
     def update_progress(self, val: int) -> None:
+        if self.progress_bar.minimum() != 0 or self.progress_bar.maximum() != 100:
+            self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(val)
+
+    def set_progress_busy(self, busy: bool, text: str = "") -> None:
+        if busy:
+            self.progress_bar.setRange(0, 0)
+            if text:
+                self.progress_bar.setFormat(text)
+            return
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setFormat("%p%")
 
     def add_action_row(self, time_range: str, label: str, conf: float, detail: str) -> None:
         row = self.table_actions.rowCount()

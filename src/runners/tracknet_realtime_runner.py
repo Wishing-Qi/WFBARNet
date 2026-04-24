@@ -12,6 +12,7 @@ from src.models.track_branch import TrackBranch
 from src.postprocess.track_filter import BallTrackFilter
 from src.utils.exporters import export_csv, export_json, export_npy
 from src.utils.structures import FrameResult, TrackResult
+from src.utils.visualize import TrackTrailRenderer
 
 
 def _parse_capture_source(source: str) -> str | int:
@@ -77,6 +78,7 @@ class TrackNetRealtimeRunner:
         ema_fps = 0.0
         tick_frequency = cv2.getTickFrequency()
         track_filter = BallTrackFilter(fps=fps)
+        trail_renderer = TrackTrailRenderer(fps=fps, history_seconds=3.0)
 
         while True:
             start_tick = cv2.getTickCount()
@@ -86,7 +88,7 @@ class TrackNetRealtimeRunner:
             result = FrameResult(frame_id=frame_id, pose=[], track=track)
             results.append(result)
 
-            vis_frame = self._draw_overlay(curr_frame.copy(), result, ema_fps)
+            vis_frame = self._draw_overlay(curr_frame.copy(), result, ema_fps, trail_renderer)
             if writer is not None:
                 writer.write(vis_frame)
             if self.display:
@@ -115,7 +117,7 @@ class TrackNetRealtimeRunner:
                 final_track = track_filter.update(final_raw_track)
                 final_result = FrameResult(frame_id=frame_id, pose=[], track=final_track)
                 results.append(final_result)
-                final_vis = self._draw_overlay(curr_frame.copy(), final_result, ema_fps)
+                final_vis = self._draw_overlay(curr_frame.copy(), final_result, ema_fps, trail_renderer)
                 if writer is not None:
                     writer.write(final_vis)
                 if self.display:
@@ -140,8 +142,14 @@ class TrackNetRealtimeRunner:
 
         return results
 
-    def _draw_overlay(self, frame: np.ndarray, result: FrameResult, fps: float) -> np.ndarray:
-        self._draw_track(frame, result.track)
+    def _draw_overlay(
+        self,
+        frame: np.ndarray,
+        result: FrameResult,
+        fps: float,
+        trail_renderer: TrackTrailRenderer,
+    ) -> np.ndarray:
+        frame = trail_renderer.draw(frame, result)
         cv2.putText(
             frame,
             f"FPS: {fps:.1f}",
@@ -165,7 +173,7 @@ class TrackNetRealtimeRunner:
     def _draw_track(self, frame: np.ndarray, track: TrackResult) -> None:
         if track.visible:
             x, y = map(int, track.ball_xy)
-            cv2.circle(frame, (x, y), 8, (0, 0, 255), -1)
+            cv2.circle(frame, (x, y), 8, (0, 0, 255), 2)
             cv2.circle(frame, (x, y), 14, (0, 255, 255), 2)
             cv2.putText(
                 frame,

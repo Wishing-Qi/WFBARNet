@@ -5,3 +5,4 @@ torchvision>=0.17
 tqdm>=4.66
 Pillow>=10.0
 matplotlib>=3.8
+ultralytics>=8.3

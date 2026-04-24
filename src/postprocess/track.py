@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import cv2
 import numpy as np
 
@@ -7,13 +9,73 @@ from src.preprocess.track import TrackPreprocessMeta
 from src.utils.structures import TrackResult
 
 
-def _extract_ball_center(mask: np.ndarray) -> tuple[float, float] | None:
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
+@dataclass(slots=True)
+class _HeatmapCandidate:
+    center: tuple[float, float]
+    score: float
+    rank: tuple[float, float, float, float]
+
+
+def _extract_ball_candidate(heatmap: np.ndarray, mask: np.ndarray) -> _HeatmapCandidate | None:
+    labels_count, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, 8)
+    if labels_count <= 1:
         return None
-    contour = max(contours, key=cv2.contourArea)
-    x, y, w, h = cv2.boundingRect(contour)
-    return float(x + w / 2.0), float(y + h / 2.0)
+
+    best: _HeatmapCandidate | None = None
+    for label_id in range(1, labels_count):
+        area = int(stats[label_id, cv2.CC_STAT_AREA])
+        if area <= 0:
+            continue
+
+        component_mask = labels == label_id
+        values = heatmap[component_mask].astype(np.float64, copy=False)
+        peak = float(values.max(initial=0.0))
+        total = float(values.sum())
+        mean = total / float(area)
+
+        ys, xs = np.nonzero(component_mask)
+        if total > 1e-8:
+            weights = values / total
+            center = (float(np.sum(xs * weights)), float(np.sum(ys * weights)))
+        else:
+            cx, cy = centroids[label_id]
+            center = (float(cx), float(cy))
+
+        width = max(int(stats[label_id, cv2.CC_STAT_WIDTH]), 1)
+        height = max(int(stats[label_id, cv2.CC_STAT_HEIGHT]), 1)
+        compactness = float(area) / float(width * height)
+        rank = (peak, mean, min(float(area), 24.0), compactness)
+        candidate = _HeatmapCandidate(center=center, score=peak, rank=rank)
+        if best is None or candidate.rank > best.rank:
+            best = candidate
+
+    return best
+
+
+def _decode_single_heatmap(
+    heatmap: np.ndarray,
+    meta: TrackPreprocessMeta,
+    score_thr: float,
+) -> TrackResult:
+    score = float(np.max(heatmap))
+    binary_mask = (heatmap > score_thr).astype(np.uint8) * 255
+    candidate = _extract_ball_candidate(heatmap, binary_mask)
+    if candidate is None:
+        return TrackResult(
+            ball_xy=[-1.0, -1.0],
+            visible=0,
+            score=score,
+            heatmap_shape=list(heatmap.shape),
+        )
+
+    x, y = candidate.center
+    ball_xy = [x * meta.scale_x, y * meta.scale_y]
+    return TrackResult(
+        ball_xy=ball_xy,
+        visible=1,
+        score=candidate.score,
+        heatmap_shape=list(heatmap.shape),
+    )
 
 
 def decode_track_heatmap(
@@ -28,25 +90,7 @@ def decode_track_heatmap(
     else:
         raise ValueError(f"Unexpected heatmap shape: {heatmaps.shape}")
 
-    score = float(np.max(heatmap))
-    binary_mask = (heatmap > score_thr).astype(np.uint8) * 255
-    center = _extract_ball_center(binary_mask)
-    if center is None:
-        return TrackResult(
-            ball_xy=[-1.0, -1.0],
-            visible=0,
-            score=score,
-            heatmap_shape=list(heatmap.shape),
-        )
-
-    x, y = center
-    ball_xy = [x * meta.scale_x, y * meta.scale_y]
-    return TrackResult(
-        ball_xy=ball_xy,
-        visible=1,
-        score=score,
-        heatmap_shape=list(heatmap.shape),
-    )
+    return _decode_single_heatmap(heatmap, meta, score_thr)
 
 
 def decode_track_heatmap_batch(
@@ -66,25 +110,6 @@ def decode_track_heatmap_batch(
         heatmap = batch_heatmaps[i, 1]
         meta = metas[i]
 
-        score = float(np.max(heatmap))
-        binary_mask = (heatmap > score_thr).astype(np.uint8) * 255
-        center = _extract_ball_center(binary_mask)
-
-        if center is None:
-            results.append(TrackResult(
-                ball_xy=[-1.0, -1.0],
-                visible=0,
-                score=score,
-                heatmap_shape=list(heatmap.shape),
-            ))
-        else:
-            x, y = center
-            ball_xy = [x * meta.scale_x, y * meta.scale_y]
-            results.append(TrackResult(
-                ball_xy=ball_xy,
-                visible=1,
-                score=score,
-                heatmap_shape=list(heatmap.shape),
-            ))
+        results.append(_decode_single_heatmap(heatmap, meta, score_thr))
 
     return results

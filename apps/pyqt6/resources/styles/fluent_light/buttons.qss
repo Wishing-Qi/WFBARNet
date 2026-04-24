@@ -28,10 +28,49 @@ QPushButton#btnUpload {
 QPushButton#btnAnalyze,
 QPushButton#btnReset,
 QPushButton#btnSelectVideo,
-QPushButton#btnForceStop {
+QPushButton#btnForceStop,
+QPushButton#btnPreviewMode,
+QPushButton#btnCameraMode,
+QPushButton#btnRefreshCameras {
     min-height: 20px;
     padding-top: 4px;
     padding-bottom: 4px;
+}
+
+QPushButton#btnPreviewMode,
+QPushButton#btnCameraMode {
+    min-width: 88px;
+    color: #64748B;
+    background-color: #F8FAFC;
+    border-color: #E2E8F0;
+    border-bottom: none;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+    border-bottom-left-radius: 0px;
+    border-bottom-right-radius: 0px;
+    padding: 8px 16px;
+    font-weight: 500;
+}
+
+QPushButton#btnPreviewMode:checked,
+QPushButton#btnCameraMode:checked {
+    color: #0F6CBD;
+    background-color: #FFFFFF;
+    border-color: #E2E8F0;
+    border-bottom: 2px solid #0F6CBD;
+    font-weight: 600;
+}
+
+QPushButton#btnPreviewMode:hover:!checked,
+QPushButton#btnCameraMode:hover:!checked {
+    color: #0F172A;
+    background-color: #F1F5F9;
+}
+
+QPushButton#btnRefreshCameras {
+    min-width: 72px;
+    color: #0F172A;
+    background-color: #FFFFFF;
 }
 
 /* --- 开始分析（主色调） --- */

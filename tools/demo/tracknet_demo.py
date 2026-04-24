@@ -12,6 +12,8 @@ import torch
 
 from src.models.track_branch import TrackBranch
 from src.postprocess.track_filter import BallTrackFilter
+from src.utils.structures import FrameResult
+from src.utils.visualize import TrackTrailRenderer
 
 
 def get_available_devices():
@@ -90,6 +92,7 @@ def main():
     tick_frequency = cv2.getTickFrequency()
     frame_count = 0
     track_filter = BallTrackFilter(fps=fps)
+    trail_renderer = TrackTrailRenderer(fps=fps, history_seconds=3.0)
 
     while True:
         start_tick = cv2.getTickCount()
@@ -97,20 +100,10 @@ def main():
         _, raw_track = track_branch.infer([prev_frame, curr_frame, next_frame])
         track = track_filter.update(raw_track)
 
-        vis_frame = curr_frame.copy()
+        result = FrameResult(frame_id=frame_id, pose=[], track=track)
+        vis_frame = trail_renderer.draw(curr_frame, result)
         if track.visible:
             x, y = map(int, track.ball_xy)
-            cv2.circle(vis_frame, (x, y), 10, (0, 0, 255), -1)
-            cv2.circle(vis_frame, (x, y), 16, (0, 255, 255), 2)
-            cv2.putText(
-                vis_frame,
-                f"ball {track.score:.2f}",
-                (x + 12, max(y - 12, 20)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 255, 255),
-                2,
-            )
             track_text = f"Track: Visible (x={x}, y={y}, score={track.score:.2f})"
         else:
             cv2.putText(

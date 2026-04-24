@@ -136,6 +136,11 @@ class VideoPlayerWidget(QFrame):
         self.path_edit.setText(path)
         self.path_edit.setToolTip(path)
 
+    def set_live_source(self, label: str) -> None:
+        self._source_path = label
+        self.path_edit.setText(label)
+        self.path_edit.setToolTip(label)
+
     def clear_video(self) -> None:
         self._source_path = ""
         self._current_pixmap = None

@@ -27,6 +27,16 @@ QLineEdit#videoPathEdit {
 
 QLineEdit#videoPathEdit:focus { border-color: #4FA3E0; }
 
+QComboBox#cameraDeviceCombo {
+    background-color: #2A2F3A;
+    border: 1px solid #4A5060;
+    border-radius: 4px;
+    color: #E8EDF5;
+    padding: 6px 10px;
+}
+
+QComboBox#cameraDeviceCombo:focus { border-color: #4FA3E0; }
+
 /* --- 主题切换按钮 --- */
 QToolButton#styleBtn {
     background-color: #2A2F3A;
