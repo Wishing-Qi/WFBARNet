@@ -12,6 +12,11 @@ import cv2
 import numpy as np
 import torch
 
+try:
+    from PyQt6.QtGui import QImage
+except Exception:
+    QImage = None
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -39,7 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-track", action="store_true")
     parser.add_argument("--no-pose", action="store_true")
     parser.add_argument("--no-render", action="store_true")
-    parser.add_argument("--qimage", action="store_true", help="Also time BGR->RGB copy like Qt display preparation.")
+    parser.add_argument("--qimage", action="store_true", help="Also time the Qt display copy used by the PyQt runtime.")
     return parser.parse_args()
 
 
@@ -54,6 +59,35 @@ def resolve_device(raw: str) -> str:
 def sync_if_cuda(device: str) -> None:
     if device.startswith("cuda") and torch.cuda.is_available():
         torch.cuda.synchronize()
+
+
+def qt_display_copy(frame: np.ndarray) -> Any:
+    if QImage is not None and hasattr(QImage.Format, "Format_BGR888"):
+        height, width = frame.shape[:2]
+        image = QImage(
+            frame.data,
+            width,
+            height,
+            frame.strides[0],
+            QImage.Format.Format_BGR888,
+        )
+        image._buffer = frame
+        return image
+
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    if QImage is None:
+        return rgb.copy()
+
+    height, width = rgb.shape[:2]
+    image = QImage(
+        rgb.data,
+        width,
+        height,
+        rgb.strides[0],
+        QImage.Format.Format_RGB888,
+    )
+    image._buffer = rgb
+    return image
 
 
 class Timer:
@@ -193,7 +227,7 @@ def main() -> None:
 
             if args.qimage:
                 with Timer(local_timings, "qimage_like_convert"):
-                    _ = cv2.cvtColor(vis_frame, cv2.COLOR_BGR2RGB).copy()
+                    _ = qt_display_copy(vis_frame)
 
         if collect:
             collected += 1

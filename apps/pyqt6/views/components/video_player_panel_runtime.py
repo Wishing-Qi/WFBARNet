@@ -29,6 +29,8 @@ class VideoPlayerWidget(QFrame):
 
         self._source_path = ""
         self._current_pixmap: QPixmap | None = None
+        self._status_text = ""
+        self._status_state = ""
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -117,18 +119,25 @@ class VideoPlayerWidget(QFrame):
         self.video_label.setPixmap(scaled)
 
     def _set_status(self, text: str, state: str) -> None:
+        if text == self._status_text and state == self._status_state:
+            return
+        state_changed = state != self._status_state
+        self._status_text = text
+        self._status_state = state
         self.video_label.setProperty("state", state)
         self.video_label.setToolTip(text)
-        self.style().unpolish(self.video_label)
-        self.style().polish(self.video_label)
-        self.video_label.update()
+        if state_changed:
+            self.style().unpolish(self.video_label)
+            self.style().polish(self.video_label)
+            self.video_label.update()
 
     def display_image(self, image: QImage) -> None:
         if image.isNull():
             return
         self._current_pixmap = QPixmap.fromImage(image)
-        self.preview_stack.setCurrentWidget(self.video_label)
-        QTimer.singleShot(0, self._render_current_pixmap)
+        if self.preview_stack.currentWidget() is not self.video_label:
+            self.preview_stack.setCurrentWidget(self.video_label)
+        self._render_current_pixmap()
         self._set_status("帧已就绪", "loaded")
 
     def set_video_path(self, path: str) -> None:

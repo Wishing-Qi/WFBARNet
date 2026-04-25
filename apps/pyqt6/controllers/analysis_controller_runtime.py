@@ -17,11 +17,15 @@ from PyQt6.QtWidgets import QApplication, QFileDialog
 
 from src.postprocess.track_filter import BallTrackFilter
 from apps.pyqt6.utils.style import apply_theme, discover_themes
+from apps.pyqt6.utils.theme_transition import start_theme_ripple_transition
 from apps.pyqt6.views.main_window_refined import MainWindow
 from src.models.pose_branch import PoseBranch
 from src.models.track_branch import TrackBranch
 from src.utils.structures import FrameResult, TrackResult
 from src.utils.visualize import TrackTrailRenderer
+
+
+DISPLAY_FPS_LIMIT = 60.0
 
 
 @contextmanager
@@ -96,16 +100,31 @@ def open_camera_capture(
 
 
 def frame_to_qimage(frame) -> QImage:
+    if hasattr(QImage.Format, "Format_BGR888"):
+        height, width = frame.shape[:2]
+        bytes_per_line = frame.strides[0]
+        image = QImage(
+            frame.data,
+            width,
+            height,
+            bytes_per_line,
+            QImage.Format.Format_BGR888,
+        )
+        image._buffer = frame
+        return image
+
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     height, width = rgb.shape[:2]
     bytes_per_line = rgb.strides[0]
-    return QImage(
+    image = QImage(
         rgb.data,
         width,
         height,
         bytes_per_line,
         QImage.Format.Format_RGB888,
-    ).copy()
+    )
+    image._buffer = rgb
+    return image
 
 
 class VideoProbeWorker(QThread):
@@ -172,6 +191,7 @@ class TrackNetPlaybackWorker(QThread):
         pose_stride: int = 3,
         track_enabled: bool = True,
         pose_enabled: bool = True,
+        display_fps_limit: float = DISPLAY_FPS_LIMIT,
     ) -> None:
         super().__init__()
         self._video_path = video_path
@@ -181,6 +201,7 @@ class TrackNetPlaybackWorker(QThread):
         self._pose_stride = max(1, pose_stride)
         self._track_enabled = track_enabled
         self._pose_enabled = pose_enabled
+        self._display_fps_limit = max(1.0, float(display_fps_limit))
         self._stop_requested = False
 
     def request_stop(self) -> None:
@@ -257,6 +278,9 @@ class TrackNetPlaybackWorker(QThread):
         last_pose = []
         track_filter = BallTrackFilter(fps=fps)
         trail_renderer = TrackTrailRenderer(fps=fps, history_seconds=3.0)
+        display_interval_ms = 1000.0 / self._display_fps_limit
+        display_every_frame = fps <= self._display_fps_limit
+        next_display_ms = float(base_ms)
 
         clock = QElapsedTimer()
         clock.start()
@@ -281,17 +305,21 @@ class TrackNetPlaybackWorker(QThread):
                 infer_fps = 1.0 / infer_elapsed
                 ema_infer_fps = infer_fps if ema_infer_fps == 0.0 else (0.85 * ema_infer_fps + 0.15 * infer_fps)
 
-                frame_result = FrameResult(frame_id=frame_id, pose=last_pose, track=track)
-                vis_frame = trail_renderer.draw(current_frame, frame_result, timestamp_ms=current_ms)
-                cv2.putText(
-                    vis_frame,
-                    f"{self._pipeline_label()} {ema_infer_fps:.1f} FPS",
-                    (16, 28),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 255, 255),
-                    2,
-                )
+                should_emit = display_every_frame or final_pass or current_ms >= next_display_ms
+                image = None
+                if should_emit:
+                    frame_result = FrameResult(frame_id=frame_id, pose=last_pose, track=track)
+                    vis_frame = trail_renderer.draw(current_frame, frame_result, timestamp_ms=current_ms)
+                    cv2.putText(
+                        vis_frame,
+                        f"{self._pipeline_label()} {ema_infer_fps:.1f} FPS",
+                        (16, 28),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (0, 255, 255),
+                        2,
+                    )
+                    image = frame_to_qimage(vis_frame)
 
                 target_ms = max(0, current_ms - base_ms)
                 if not self._sleep_until(target_ms, clock):
@@ -301,26 +329,28 @@ class TrackNetPlaybackWorker(QThread):
                 visible_frames += int(bool(track.visible))
                 score_sum += float(track.score)
                 avg_score = score_sum / max(processed_frames, 1)
-                image = frame_to_qimage(vis_frame)
-
-                payload = {
-                    "image": image,
-                    "frame_id": frame_id,
-                    "position_ms": current_ms,
-                    "duration_ms": duration_ms,
-                    "progress": (current_ms / duration_ms) if duration_ms > 0 else 0.0,
-                    "track": {
-                        "ball_xy": list(track.ball_xy),
-                        "visible": bool(track.visible),
-                        "score": float(track.score),
-                    },
-                    "visible_frames": visible_frames,
-                    "pose_frames": pose_frames,
-                    "person_count": len(last_pose),
-                    "avg_score": avg_score,
-                    "processed_frames": processed_frames,
-                }
-                self.frameReady.emit(payload)
+                if should_emit:
+                    payload = {
+                        "image": image,
+                        "frame_id": frame_id,
+                        "position_ms": current_ms,
+                        "duration_ms": duration_ms,
+                        "progress": (current_ms / duration_ms) if duration_ms > 0 else 0.0,
+                        "track": {
+                            "ball_xy": list(track.ball_xy),
+                            "visible": bool(track.visible),
+                            "score": float(track.score),
+                        },
+                        "visible_frames": visible_frames,
+                        "pose_frames": pose_frames,
+                        "person_count": len(last_pose),
+                        "avg_score": avg_score,
+                        "processed_frames": processed_frames,
+                    }
+                    self.frameReady.emit(payload)
+                    if not display_every_frame:
+                        while next_display_ms <= current_ms:
+                            next_display_ms += display_interval_ms
 
                 if final_pass:
                     break
@@ -365,6 +395,7 @@ class CameraInferenceWorker(QThread):
         pose_stride: int = 3,
         track_enabled: bool = True,
         pose_enabled: bool = True,
+        display_fps_limit: float = DISPLAY_FPS_LIMIT,
     ) -> None:
         super().__init__()
         self._camera_index = camera_index
@@ -373,6 +404,7 @@ class CameraInferenceWorker(QThread):
         self._pose_stride = max(1, pose_stride)
         self._track_enabled = track_enabled
         self._pose_enabled = pose_enabled
+        self._display_fps_limit = max(1.0, float(display_fps_limit))
         self._stop_requested = False
 
     def request_stop(self) -> None:
@@ -417,6 +449,8 @@ class CameraInferenceWorker(QThread):
         last_pose = []
         track_filter = BallTrackFilter(fps=fps)
         trail_renderer = TrackTrailRenderer(fps=fps, history_seconds=3.0)
+        display_interval_ms = 1000.0 / self._display_fps_limit
+        next_display_ms = 0.0
         clock = QElapsedTimer()
         clock.start()
 
@@ -439,43 +473,46 @@ class CameraInferenceWorker(QThread):
                 infer_fps = 1.0 / infer_elapsed
                 ema_infer_fps = infer_fps if ema_infer_fps == 0.0 else (0.85 * ema_infer_fps + 0.15 * infer_fps)
 
-                frame_result = FrameResult(frame_id=processed_frames, pose=last_pose, track=track)
-                vis_frame = trail_renderer.draw(current_frame, frame_result, timestamp_ms=clock.elapsed())
-                cv2.putText(
-                    vis_frame,
-                    f"Camera {self._camera_index} ({backend_name}) | {self._pipeline_label()} {ema_infer_fps:.1f} FPS",
-                    (16, 28),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 255, 255),
-                    2,
-                )
-
                 processed_frames += 1
                 visible_frames += int(bool(track.visible))
                 score_sum += float(track.score)
                 avg_score = score_sum / max(processed_frames, 1)
-                image = frame_to_qimage(vis_frame)
+                position_ms = clock.elapsed()
+                if position_ms >= next_display_ms:
+                    frame_result = FrameResult(frame_id=processed_frames - 1, pose=last_pose, track=track)
+                    vis_frame = trail_renderer.draw(current_frame, frame_result, timestamp_ms=position_ms)
+                    cv2.putText(
+                        vis_frame,
+                        f"Camera {self._camera_index} ({backend_name}) | {self._pipeline_label()} {ema_infer_fps:.1f} FPS",
+                        (16, 28),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (0, 255, 255),
+                        2,
+                    )
+                    image = frame_to_qimage(vis_frame)
 
-                payload = {
-                    "image": image,
-                    "frame_id": processed_frames - 1,
-                    "position_ms": clock.elapsed(),
-                    "duration_ms": 0,
-                    "progress": 0.0,
-                    "track": {
-                        "ball_xy": list(track.ball_xy),
-                        "visible": bool(track.visible),
-                        "score": float(track.score),
-                    },
-                    "visible_frames": visible_frames,
-                    "pose_frames": pose_frames,
-                    "person_count": len(last_pose),
-                    "avg_score": avg_score,
-                    "processed_frames": processed_frames,
-                    "infer_fps": ema_infer_fps,
-                }
-                self.frameReady.emit(payload)
+                    payload = {
+                        "image": image,
+                        "frame_id": processed_frames - 1,
+                        "position_ms": position_ms,
+                        "duration_ms": 0,
+                        "progress": 0.0,
+                        "track": {
+                            "ball_xy": list(track.ball_xy),
+                            "visible": bool(track.visible),
+                            "score": float(track.score),
+                        },
+                        "visible_frames": visible_frames,
+                        "pose_frames": pose_frames,
+                        "person_count": len(last_pose),
+                        "avg_score": avg_score,
+                        "processed_frames": processed_frames,
+                        "infer_fps": ema_infer_fps,
+                    }
+                    self.frameReady.emit(payload)
+                    while next_display_ms <= position_ms:
+                        next_display_ms += display_interval_ms
 
                 prev_frame = current_frame
                 current_frame = next_frame
@@ -511,6 +548,7 @@ class MainController:
         self._pose_model_enabled = self._load_bool_setting("pose_model_enabled", True)
         self._track_model_enabled = self._load_bool_setting("track_model_enabled", True)
         self._theme_dirs = discover_themes()
+        self._active_theme_name = self._resolve_initial_theme_name()
         self._selected_video_path: str | None = None
         self._video_meta: dict[str, Any] = {}
         self._input_mode = "video"
@@ -528,7 +566,7 @@ class MainController:
         self._pose_branch = self._build_pose_branch()
 
         self._bind_events()
-        self.view.populate_stylesheets(self._theme_dirs)
+        self.view.populate_stylesheets(self._theme_dirs, self._active_theme_name)
         self.view.video_timeline.set_interactive(True)
         self._refresh_camera_devices(log=False)
         self._reset_metrics()
@@ -557,6 +595,11 @@ class MainController:
         if path.is_absolute():
             return path
         return self._project_root / path
+
+    def _resolve_initial_theme_name(self) -> str:
+        if any(theme_dir.name == "office_light" for theme_dir in self._theme_dirs):
+            return "office_light"
+        return self._theme_dirs[0].name if self._theme_dirs else ""
 
     def _build_track_branch(self) -> TrackBranch:
         branch = self._create_track_branch(self._track_model_path)
@@ -1164,12 +1207,22 @@ class MainController:
         theme_dir = next((d for d in self._theme_dirs if d.name == theme_name), None)
         if theme_dir is None:
             return
+        if theme_dir.name == self._active_theme_name:
+            return
 
         def _apply() -> None:
             apply_theme(app, theme_dir)
+            self._active_theme_name = theme_dir.name
             self.view.append_log(f"[主题] 已切换至 {theme_dir.name}")
 
-        QTimer.singleShot(0, _apply)
+        QTimer.singleShot(
+            0,
+            lambda: start_theme_ripple_transition(
+                self.view,
+                _apply,
+                origin_widget=self.view.style_btn,
+            ),
+        )
 
 
 MockController = MainController
