@@ -65,7 +65,7 @@ class TrackVideoRunner:
         results: list[FrameResult] = []
         track_filter = BallTrackFilter()
         for frame_id, _, window in tqdm(list(iter_frame_windows(frames)), desc="Track inference"):
-            _, raw_track = self.track_branch.infer(window)
+            raw_track = self.track_branch.infer_result(window)
             track = track_filter.update(raw_track)
             results.append(FrameResult(frame_id=frame_id, pose=[], track=track))
 
@@ -103,7 +103,7 @@ class TrackVideoRunner:
         progress = tqdm(total=progress_total, desc="Track inference")
         try:
             for frame_id, curr_frame, window in iter_video_frame_windows(source, max_frames=max_frames):
-                _, raw_track = self.track_branch.infer(window)
+                raw_track = self.track_branch.infer_result(window)
                 track = track_filter.update(raw_track)
                 result = FrameResult(frame_id=frame_id, pose=[], track=track)
                 results.append(result)

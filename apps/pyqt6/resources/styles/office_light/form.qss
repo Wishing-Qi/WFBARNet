@@ -19,7 +19,8 @@ QProgressBar::chunk {
 }
 
 /* --- 文本输入框 --- */
-QLineEdit#videoPathEdit {
+QLineEdit#videoPathEdit,
+QLineEdit#modelPathEdit {
     background-color: #FFFFFF;
     border: 1px solid #525252;
     border-radius: 2px;
@@ -27,7 +28,8 @@ QLineEdit#videoPathEdit {
     padding: 6px 10px;
 }
 
-QLineEdit#videoPathEdit:focus { border-color: #217346; }
+QLineEdit#videoPathEdit:focus,
+QLineEdit#modelPathEdit:focus { border-color: #217346; }
 
 QComboBox#cameraDeviceCombo {
     background-color: #FFFFFF;

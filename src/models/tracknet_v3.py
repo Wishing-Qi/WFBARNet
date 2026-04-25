@@ -79,8 +79,8 @@ class ChannelAttention(nn.Module):
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        avg_out = self.shared_MLP(F.adaptive_avg_pool2d(x, 1))
-        max_out = self.shared_MLP(F.adaptive_max_pool2d(x, 1))
+        avg_out = self.shared_MLP(torch.mean(x, dim=(2, 3), keepdim=True))
+        max_out = self.shared_MLP(torch.amax(x, dim=(2, 3), keepdim=True))
         return self.sigmoid(avg_out + max_out)
 
 

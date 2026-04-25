@@ -7,10 +7,11 @@ from pathlib import Path
 import sys
 from time import perf_counter
 from typing import Any
+import importlib.util
 
 import cv2
 import torch
-from PyQt6.QtCore import QElapsedTimer, QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import QElapsedTimer, QSettings, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QImage
 from PyQt6.QtWidgets import QApplication, QFileDialog
 
@@ -19,7 +20,7 @@ from apps.pyqt6.utils.style import apply_theme, discover_themes
 from apps.pyqt6.views.main_window_refined import MainWindow
 from src.models.pose_branch import PoseBranch
 from src.models.track_branch import TrackBranch
-from src.utils.structures import FrameResult
+from src.utils.structures import FrameResult, TrackResult
 from src.utils.visualize import TrackTrailRenderer
 
 
@@ -169,6 +170,8 @@ class TrackNetPlaybackWorker(QThread):
         *,
         start_ms: int = 0,
         pose_stride: int = 3,
+        track_enabled: bool = True,
+        pose_enabled: bool = True,
     ) -> None:
         super().__init__()
         self._video_path = video_path
@@ -176,10 +179,20 @@ class TrackNetPlaybackWorker(QThread):
         self._pose_branch = pose_branch
         self._start_ms = max(0, start_ms)
         self._pose_stride = max(1, pose_stride)
+        self._track_enabled = track_enabled
+        self._pose_enabled = pose_enabled
         self._stop_requested = False
 
     def request_stop(self) -> None:
         self._stop_requested = True
+
+    def _pipeline_label(self) -> str:
+        names = []
+        if self._track_enabled:
+            names.append("TrackNet")
+        if self._pose_enabled:
+            names.append("YOLO26s-Pose")
+        return " + ".join(names) if names else "Preview"
 
     def _read_frame(
         self,
@@ -250,14 +263,21 @@ class TrackNetPlaybackWorker(QThread):
 
         try:
             while not self._stop_requested:
-                infer_start = perf_counter()
-                _, raw_track = self._track_branch.infer([prev_frame, current_frame, next_frame])
-                track = track_filter.update(raw_track)
+                loop_start = perf_counter()
+                if self._track_enabled:
+                    raw_track = self._track_branch.infer_result([prev_frame, current_frame, next_frame])
+                    track = track_filter.update(raw_track)
+                else:
+                    track = TrackResult(ball_xy=[-1.0, -1.0], visible=0, score=0.0)
+
                 frame_id = int(round((current_ms / 1000.0) * fps)) if fps > 0 else processed_frames
-                if processed_frames % self._pose_stride == 0:
+                if self._pose_enabled and processed_frames % self._pose_stride == 0:
                     last_pose = self._pose_branch.infer(current_frame)
                     pose_frames += int(bool(last_pose))
-                infer_elapsed = max(perf_counter() - infer_start, 1e-6)
+                elif not self._pose_enabled:
+                    last_pose = []
+
+                infer_elapsed = max(perf_counter() - loop_start, 1e-6)
                 infer_fps = 1.0 / infer_elapsed
                 ema_infer_fps = infer_fps if ema_infer_fps == 0.0 else (0.85 * ema_infer_fps + 0.15 * infer_fps)
 
@@ -265,7 +285,7 @@ class TrackNetPlaybackWorker(QThread):
                 vis_frame = trail_renderer.draw(current_frame, frame_result, timestamp_ms=current_ms)
                 cv2.putText(
                     vis_frame,
-                    f"TrackNet + YOLO26s-Pose {ema_infer_fps:.1f} FPS",
+                    f"{self._pipeline_label()} {ema_infer_fps:.1f} FPS",
                     (16, 28),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.7,
@@ -281,9 +301,10 @@ class TrackNetPlaybackWorker(QThread):
                 visible_frames += int(bool(track.visible))
                 score_sum += float(track.score)
                 avg_score = score_sum / max(processed_frames, 1)
+                image = frame_to_qimage(vis_frame)
 
                 payload = {
-                    "image": frame_to_qimage(vis_frame),
+                    "image": image,
                     "frame_id": frame_id,
                     "position_ms": current_ms,
                     "duration_ms": duration_ms,
@@ -342,16 +363,28 @@ class CameraInferenceWorker(QThread):
         pose_branch: PoseBranch,
         *,
         pose_stride: int = 3,
+        track_enabled: bool = True,
+        pose_enabled: bool = True,
     ) -> None:
         super().__init__()
         self._camera_index = camera_index
         self._track_branch = track_branch
         self._pose_branch = pose_branch
         self._pose_stride = max(1, pose_stride)
+        self._track_enabled = track_enabled
+        self._pose_enabled = pose_enabled
         self._stop_requested = False
 
     def request_stop(self) -> None:
         self._stop_requested = True
+
+    def _pipeline_label(self) -> str:
+        names = []
+        if self._track_enabled:
+            names.append("TrackNet")
+        if self._pose_enabled:
+            names.append("YOLO26s-Pose")
+        return " + ".join(names) if names else "Preview"
 
     def run(self) -> None:
         cap, backend_name = open_camera_capture(self._camera_index, quiet=True)
@@ -389,13 +422,20 @@ class CameraInferenceWorker(QThread):
 
         try:
             while not self._stop_requested:
-                infer_start = perf_counter()
-                _, raw_track = self._track_branch.infer([prev_frame, current_frame, next_frame])
-                track = track_filter.update(raw_track)
-                if processed_frames % self._pose_stride == 0:
+                loop_start = perf_counter()
+                if self._track_enabled:
+                    raw_track = self._track_branch.infer_result([prev_frame, current_frame, next_frame])
+                    track = track_filter.update(raw_track)
+                else:
+                    track = TrackResult(ball_xy=[-1.0, -1.0], visible=0, score=0.0)
+
+                if self._pose_enabled and processed_frames % self._pose_stride == 0:
                     last_pose = self._pose_branch.infer(current_frame)
                     pose_frames += int(bool(last_pose))
-                infer_elapsed = max(perf_counter() - infer_start, 1e-6)
+                elif not self._pose_enabled:
+                    last_pose = []
+
+                infer_elapsed = max(perf_counter() - loop_start, 1e-6)
                 infer_fps = 1.0 / infer_elapsed
                 ema_infer_fps = infer_fps if ema_infer_fps == 0.0 else (0.85 * ema_infer_fps + 0.15 * infer_fps)
 
@@ -403,7 +443,7 @@ class CameraInferenceWorker(QThread):
                 vis_frame = trail_renderer.draw(current_frame, frame_result, timestamp_ms=clock.elapsed())
                 cv2.putText(
                     vis_frame,
-                    f"Camera {self._camera_index} ({backend_name}) | TrackNet + YOLO26s-Pose {ema_infer_fps:.1f} FPS",
+                    f"Camera {self._camera_index} ({backend_name}) | {self._pipeline_label()} {ema_infer_fps:.1f} FPS",
                     (16, 28),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.7,
@@ -415,9 +455,10 @@ class CameraInferenceWorker(QThread):
                 visible_frames += int(bool(track.visible))
                 score_sum += float(track.score)
                 avg_score = score_sum / max(processed_frames, 1)
+                image = frame_to_qimage(vis_frame)
 
                 payload = {
-                    "image": frame_to_qimage(vis_frame),
+                    "image": image,
                     "frame_id": processed_frames - 1,
                     "position_ms": clock.elapsed(),
                     "duration_ms": 0,
@@ -461,6 +502,14 @@ class MainController:
 
     def __init__(self, view: MainWindow) -> None:
         self.view = view
+        self._project_root = Path(__file__).resolve().parents[3]
+        self._settings = QSettings("WFBARNet", "PyQt6Runtime")
+        self._default_pose_model_path = str(self._project_root / "assets" / "weights" / "pose" / "yolo26s-pose.pt")
+        self._default_track_model_path = str(self._project_root / "assets" / "weights" / "track" / "model_best.pt")
+        self._pose_model_path = self._load_model_path("pose_model_path", self._default_pose_model_path)
+        self._track_model_path = self._load_model_path("track_model_path", self._default_track_model_path)
+        self._pose_model_enabled = self._load_bool_setting("pose_model_enabled", True)
+        self._track_model_enabled = self._load_bool_setting("track_model_enabled", True)
         self._theme_dirs = discover_themes()
         self._selected_video_path: str | None = None
         self._video_meta: dict[str, Any] = {}
@@ -470,7 +519,11 @@ class MainController:
         self._playback_worker: TrackNetPlaybackWorker | None = None
         self._camera_worker: CameraInferenceWorker | None = None
         self._pending_seek_ms: int | None = None
+        self._last_display_frame_time: float | None = None
+        self._display_fps_ema = 0.0
 
+        self.view.set_model_settings(self._pose_model_path, self._track_model_path)
+        self.view.set_model_switches(self._pose_model_enabled, self._track_model_enabled)
         self._track_branch = self._build_track_branch()
         self._pose_branch = self._build_pose_branch()
 
@@ -482,32 +535,69 @@ class MainController:
         self._set_idle_state()
         self.view.append_log("[系统] 界面已就绪，请选择视频开始。")
 
+    def _load_model_path(self, key: str, default_path: str) -> str:
+        raw_value = self._settings.value(key, default_path)
+        value = str(raw_value or default_path).strip()
+        if not value:
+            return default_path
+
+        resolved = self._resolve_model_path(value)
+        if resolved.is_file():
+            return str(resolved)
+        return default_path
+
+    def _load_bool_setting(self, key: str, default: bool) -> bool:
+        raw_value = self._settings.value(key, default)
+        if isinstance(raw_value, bool):
+            return raw_value
+        return str(raw_value).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _resolve_model_path(self, raw_path: str) -> Path:
+        path = Path(raw_path.strip()).expanduser()
+        if path.is_absolute():
+            return path
+        return self._project_root / path
+
     def _build_track_branch(self) -> TrackBranch:
-        project_root = Path(__file__).resolve().parents[3]
-        model_weight = project_root / "assets" / "weights" / "track" / "model_best.pt"
+        branch = self._create_track_branch(self._track_model_path)
+        self.view.append_log(
+            f"[TrackNet] 模型已加载: {branch.device} | 后端 {branch.backend_name} | {Path(self._track_model_path).name}"
+        )
+        return branch
+
+    def _create_track_branch(self, model_weight: str) -> TrackBranch:
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        branch = TrackBranch(
+        model_path = Path(model_weight)
+        if model_path.suffix.lower() == ".engine":
+            if device != "cuda":
+                raise RuntimeError(
+                    "TensorRT INT8 engine 需要 CUDA 版 PyTorch；当前环境未检测到可用 CUDA。"
+                )
+            if importlib.util.find_spec("tensorrt") is None:
+                raise RuntimeError(
+                    "TensorRT INT8 engine 需要安装 tensorrt Python 包；当前环境未检测到 tensorrt。"
+                )
+        return TrackBranch(
             model_weight=str(model_weight),
             device=device,
             input_size=(512, 288),
             score_thr=0.35,
         )
-        self.view.append_log(f"[TrackNet] 模型已加载: {device}")
-        return branch
 
     def _build_pose_branch(self) -> PoseBranch:
-        project_root = Path(__file__).resolve().parents[3]
-        model_weight = project_root / "assets" / "weights" / "pose" / "yolo26s-pose.pt"
+        branch = self._create_pose_branch(self._pose_model_path)
+        self.view.append_log(f"[YOLO26s-Pose] 模型已加载: {branch.device} | {Path(self._pose_model_path).name}")
+        return branch
+
+    def _create_pose_branch(self, model_weight: str) -> PoseBranch:
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        branch = PoseBranch(
+        return PoseBranch(
             backend="yolo26s-pose",
             model_weight=str(model_weight),
             device=device,
             conf_thr=0.35,
             max_persons=2,
         )
-        self.view.append_log(f"[YOLO26s-Pose] 模型已加载: {device}")
-        return branch
 
     def _bind_events(self) -> None:
         self.view.btn_analyze.clicked.connect(self.handle_analyze)
@@ -520,6 +610,11 @@ class MainController:
         self.view.video_player.forceStopRequested.connect(self.handle_force_stop)
         self.view.video_timeline.seekRequested.connect(self.handle_seek)
         self.view._style_menu.triggered.connect(self._on_style_action_triggered)
+        self.view.poseModelBrowseRequested.connect(self.handle_browse_pose_model)
+        self.view.trackModelBrowseRequested.connect(self.handle_browse_track_model)
+        self.view.modelSettingsApplyRequested.connect(self.handle_model_settings_apply)
+        self.view.modelSettingsDefaultsRequested.connect(self.handle_model_settings_defaults)
+        self.view.modelSwitchesChanged.connect(self.handle_model_switches_changed)
 
     def _set_idle_state(self) -> None:
         has_video = self._selected_video_path is not None
@@ -531,6 +626,7 @@ class MainController:
         self.view.camera_device_combo.setEnabled(self._input_mode == "camera")
         self.view.video_player.btn_force_stop.setEnabled(has_video if self._input_mode == "video" else False)
         self.view.video_timeline.set_interactive(self._input_mode == "video")
+        self.view.set_model_settings_enabled(True)
         self.view.set_status_state("idle")
 
     def _set_running_state(self) -> None:
@@ -541,12 +637,36 @@ class MainController:
         self.view.camera_device_combo.setEnabled(False)
         self.view.video_player.btn_force_stop.setEnabled(True)
         self.view.video_timeline.set_interactive(False)
+        self.view.set_model_settings_enabled(False)
         self.view.set_status_state("loading")
 
     def _reset_metrics(self) -> None:
         self.view.set_progress_busy(False)
         self.view.reset_analysis()
         self.view.video_timeline.reset()
+        self._reset_display_fps()
+
+    def _reset_display_fps(self) -> None:
+        self._last_display_frame_time = None
+        self._display_fps_ema = 0.0
+        self.view.lbl_realtime_fps.setText("0.0 FPS")
+
+    def _update_display_fps(self) -> float:
+        now = perf_counter()
+        if self._last_display_frame_time is None:
+            self._last_display_frame_time = now
+            return self._display_fps_ema
+
+        elapsed = max(now - self._last_display_frame_time, 1e-6)
+        self._last_display_frame_time = now
+        instant_fps = 1.0 / elapsed
+        self._display_fps_ema = (
+            instant_fps
+            if self._display_fps_ema <= 0.0
+            else (0.85 * self._display_fps_ema + 0.15 * instant_fps)
+        )
+        self.view.lbl_realtime_fps.setText(f"{self._display_fps_ema:.1f} FPS")
+        return self._display_fps_ema
 
     def handle_input_mode(self, mode: str) -> None:
         if mode not in {"video", "camera"}:
@@ -595,6 +715,123 @@ class MainController:
                 self.view.append_log(f"[摄像头] 已发现设备: {labels}")
             else:
                 self.view.append_log("[摄像头] 自动探测未读到画面，已提供 0/1/2 手动索引")
+        self._set_idle_state()
+
+    def _is_inference_running(self) -> bool:
+        return bool(
+            (self._playback_worker is not None and self._playback_worker.isRunning())
+            or (self._camera_worker is not None and self._camera_worker.isRunning())
+        )
+
+    def _model_dialog_start_dir(self, current_path: str, default_path: str) -> str:
+        current = self._resolve_model_path(current_path) if current_path.strip() else Path(default_path)
+        if current.exists():
+            return str(current.parent)
+        if current.parent.exists():
+            return str(current.parent)
+        return str(Path(default_path).parent)
+
+    def handle_browse_pose_model(self) -> None:
+        pose_model_path, _track_model_path = self.view.model_settings()
+        file_path, _ = QFileDialog.getOpenFileName(
+            self.view,
+            "选择骨骼模型",
+            self._model_dialog_start_dir(pose_model_path, self._default_pose_model_path),
+            "模型文件 (*.pt *.pth *.onnx *.engine *.ckpt);;所有文件 (*)",
+        )
+        if file_path:
+            self.view.pose_model_edit.setText(file_path)
+
+    def handle_browse_track_model(self) -> None:
+        _pose_model_path, track_model_path = self.view.model_settings()
+        file_path, _ = QFileDialog.getOpenFileName(
+            self.view,
+            "选择球轨迹模型",
+            self._model_dialog_start_dir(track_model_path, self._default_track_model_path),
+            "模型文件 (*.pt *.pth *.onnx *.engine *.ckpt);;所有文件 (*)",
+        )
+        if file_path:
+            self.view.track_model_edit.setText(file_path)
+
+    def handle_model_settings_defaults(self) -> None:
+        self.view.set_model_settings(self._default_pose_model_path, self._default_track_model_path)
+        self.view.set_model_switches(True, True)
+        self.handle_model_switches_changed(True, True)
+        self.handle_model_settings_apply(self._default_pose_model_path, self._default_track_model_path)
+
+    def handle_model_switches_changed(self, pose_enabled: bool, track_enabled: bool) -> None:
+        if self._is_inference_running():
+            self.view.set_model_switches(self._pose_model_enabled, self._track_model_enabled)
+            self.view.append_log("[设置] 请先停止当前推理，再切换模型开关。")
+            return
+
+        self._pose_model_enabled = pose_enabled
+        self._track_model_enabled = track_enabled
+        self._settings.setValue("pose_model_enabled", pose_enabled)
+        self._settings.setValue("track_model_enabled", track_enabled)
+        self._settings.sync()
+        pose_text = "启用" if pose_enabled else "关闭"
+        track_text = "启用" if track_enabled else "关闭"
+        self.view.append_log(f"[设置] 模型开关已更新 | 骨骼 {pose_text} | 球轨迹 {track_text}")
+
+    def handle_model_settings_apply(self, pose_model_path: str, track_model_path: str) -> None:
+        if self._is_inference_running():
+            self.view.append_log("[设置] 请先停止当前推理，再切换模型。")
+            return
+
+        pose_path = self._resolve_model_path(pose_model_path)
+        track_path = self._resolve_model_path(track_model_path)
+        missing_paths = [
+            ("骨骼模型", pose_path),
+            ("球轨迹模型", track_path),
+        ]
+        for label, path in missing_paths:
+            if not path.is_file():
+                self.view.set_status_state("error")
+                self.view.append_log(f"[设置] {label}文件不存在: {path}")
+                return
+
+        pose_path_text = str(pose_path)
+        track_path_text = str(track_path)
+        requested_backend = "tensorrt" if track_path.suffix.lower() == ".engine" else "pytorch"
+        if pose_path_text == self._pose_model_path and track_path_text == self._track_model_path:
+            self.view.append_log(
+                f"[设置] 模型路径未变化，当前球轨迹后端: {getattr(self._track_branch, 'backend_name', 'unknown')}"
+            )
+            return
+
+        self.view.append_log(
+            f"[设置] 正在应用模型 | 球轨迹: {track_path.name} | 目标后端 {requested_backend}"
+        )
+        self.view.set_model_settings_enabled(False)
+        self.view.set_progress_busy(True, "正在加载模型")
+        try:
+            track_branch = self._create_track_branch(track_path_text)
+            pose_branch = self._create_pose_branch(pose_path_text)
+        except Exception as exc:
+            self.view.set_progress_busy(False)
+            self.view.set_model_settings_enabled(True)
+            self.view.set_status_state("error")
+            self.view.append_log(f"[设置] 模型加载失败: {exc}")
+            self.view.append_log(
+                f"[设置] 已保持当前模型 | 球轨迹: {Path(self._track_model_path).name} | "
+                f"后端 {getattr(self._track_branch, 'backend_name', 'unknown')}"
+            )
+            self.view.set_model_settings(self._pose_model_path, self._track_model_path)
+            return
+
+        self._stop_workers(clear_pending_seek=True)
+        self._track_branch = track_branch
+        self._pose_branch = pose_branch
+        self._pose_model_path = pose_path_text
+        self._track_model_path = track_path_text
+        self._settings.setValue("pose_model_path", pose_path_text)
+        self._settings.setValue("track_model_path", track_path_text)
+        self._settings.sync()
+        self.view.set_model_settings(pose_path_text, track_path_text)
+        self.view.set_progress_busy(False)
+        self.view.append_log(f"[设置] 骨骼模型已应用: {pose_path.name}")
+        self.view.append_log(f"[设置] 球轨迹模型已应用: {track_path.name} | 后端 {track_branch.backend_name}")
         self._set_idle_state()
 
     def handle_upload(self) -> None:
@@ -683,13 +920,19 @@ class MainController:
         self.view.video_player.set_live_source(f"摄像头 {camera_index}")
         self.view.video_player.play()
         self.view.set_progress_busy(True, "实时推理中")
-        self.view.append_log(f"[TrackNet] 开始摄像头实时推理: 摄像头 {camera_index}")
+        self.view.append_log(
+            f"[TrackNet] 开始摄像头实时推理: 摄像头 {camera_index} | "
+            f"球轨迹 {'启用' if self._track_model_enabled else '关闭'} | "
+            f"骨骼 {'启用' if self._pose_model_enabled else '关闭'}"
+        )
 
         self._camera_worker = CameraInferenceWorker(
             camera_index,
             self._track_branch,
             self._pose_branch,
             pose_stride=3,
+            track_enabled=self._track_model_enabled,
+            pose_enabled=self._pose_model_enabled,
         )
         self._camera_worker.frameReady.connect(self._on_camera_frame_ready)
         self._camera_worker.inferFinished.connect(self._on_camera_finished)
@@ -704,7 +947,9 @@ class MainController:
         self._set_running_state()
         self.view.video_player.play()
         self.view.append_log(
-            f"[TrackNet] 开始播放: {Path(self._selected_video_path).name}"
+            f"[TrackNet] 开始播放: {Path(self._selected_video_path).name} | "
+            f"球轨迹 {'启用' if self._track_model_enabled else '关闭'} | "
+            f"骨骼 {'启用' if self._pose_model_enabled else '关闭'}"
         )
 
         self._playback_worker = TrackNetPlaybackWorker(
@@ -713,6 +958,8 @@ class MainController:
             self._pose_branch,
             start_ms=start_ms,
             pose_stride=3,
+            track_enabled=self._track_model_enabled,
+            pose_enabled=self._pose_model_enabled,
         )
         self._playback_worker.frameReady.connect(self._on_frame_ready)
         self._playback_worker.playbackFinished.connect(self._on_playback_finished)
@@ -730,6 +977,7 @@ class MainController:
                 int(payload.get("position_ms", 0)),
                 int(payload.get("duration_ms", 0)),
             )
+            self._update_display_fps()
 
         progress = max(0, min(int(float(payload.get("progress", 0.0)) * 100), 100))
         self.view.update_progress(progress)
@@ -742,7 +990,6 @@ class MainController:
         track = payload.get("track", {})
         current_score = float(track.get("score", 0.0)) if isinstance(track, dict) else 0.0
 
-        self.view.lbl_total_actions.setText(str(processed_frames))
         self.view.lbl_valid_pose.setText(str(pose_frames))
         self.view.lbl_valid_track.setText(str(visible_frames))
         self.view.lbl_avg_conf.setText(f"{avg_score * 100:.1f}%")
@@ -757,6 +1004,7 @@ class MainController:
         image = payload.get("image")
         if isinstance(image, QImage):
             self.view.video_player.display_image(image)
+            self._update_display_fps()
 
         processed_frames = int(payload.get("processed_frames", 0))
         visible_frames = int(payload.get("visible_frames", 0))
@@ -767,7 +1015,6 @@ class MainController:
         current_score = float(track.get("score", 0.0)) if isinstance(track, dict) else 0.0
         infer_fps = float(payload.get("infer_fps", 0.0))
 
-        self.view.lbl_total_actions.setText(str(processed_frames))
         self.view.lbl_valid_pose.setText(str(pose_frames))
         self.view.lbl_valid_track.setText(str(visible_frames))
         self.view.lbl_avg_conf.setText(f"{avg_score * 100:.1f}%")

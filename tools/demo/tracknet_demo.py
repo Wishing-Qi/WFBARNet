@@ -97,7 +97,7 @@ def main():
     while True:
         start_tick = cv2.getTickCount()
 
-        _, raw_track = track_branch.infer([prev_frame, curr_frame, next_frame])
+        raw_track = track_branch.infer_result([prev_frame, curr_frame, next_frame])
         track = track_filter.update(raw_track)
 
         result = FrameResult(frame_id=frame_id, pose=[], track=track)

@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QAction, QColor
+from PyQt6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRectF, QSize, Qt, pyqtProperty, pyqtSignal
+from PyQt6.QtGui import QAction, QColor, QPainter
 from PyQt6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
+    QCheckBox,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMenu,
     QComboBox,
@@ -31,8 +33,80 @@ from apps.pyqt6.views.components.video_player_panel_runtime import (
 )
 
 
+class ToggleSwitch(QCheckBox):
+    def __init__(self, tooltip: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._offset = 1.0
+        self.setObjectName("modelSwitch")
+        self.setFixedSize(46, 24)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(tooltip)
+        self.setText("")
+        self._animation = QPropertyAnimation(self, b"offset", self)
+        self._animation.setDuration(140)
+        self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.toggled.connect(self._animate_toggle)
+
+    def get_offset(self) -> float:
+        return self._offset
+
+    def set_offset(self, value: float) -> None:
+        self._offset = max(0.0, min(float(value), 1.0))
+        self.update()
+
+    offset = pyqtProperty(float, fget=get_offset, fset=set_offset)
+
+    def sizeHint(self) -> QSize:
+        return QSize(46, 24)
+
+    def hitButton(self, pos: QPoint) -> bool:
+        return self.rect().contains(pos)
+
+    def setChecked(self, checked: bool) -> None:
+        super().setChecked(checked)
+        if not self._animation.state() == QPropertyAnimation.State.Running:
+            self.set_offset(1.0 if checked else 0.0)
+
+    def _animate_toggle(self, checked: bool) -> None:
+        self._animation.stop()
+        self._animation.setStartValue(self._offset)
+        self._animation.setEndValue(1.0 if checked else 0.0)
+        self._animation.start()
+
+    def paintEvent(self, event) -> None:
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        track_rect = QRectF(1, 2, 44, 20)
+        off_color = QColor("#9CA3AF")
+        on_color = QColor("#22C55E")
+        track_color = QColor(
+            int(off_color.red() + (on_color.red() - off_color.red()) * self._offset),
+            int(off_color.green() + (on_color.green() - off_color.green()) * self._offset),
+            int(off_color.blue() + (on_color.blue() - off_color.blue()) * self._offset),
+        )
+        if not self.isEnabled():
+            track_color = QColor("#D1D5DB")
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(track_color)
+        painter.drawRoundedRect(track_rect, 10, 10)
+
+        knob_size = 18
+        knob_x = 3 + (22 * self._offset)
+        knob_rect = QRectF(knob_x, 3, knob_size, knob_size)
+        painter.setBrush(QColor("#FFFFFF"))
+        painter.drawEllipse(knob_rect)
+
+
 class MainWindow(QMainWindow):
     """视图层：负责布局、控件实例化和基础状态展示。"""
+
+    poseModelBrowseRequested = pyqtSignal()
+    trackModelBrowseRequested = pyqtSignal()
+    modelSettingsApplyRequested = pyqtSignal(str, str)
+    modelSettingsDefaultsRequested = pyqtSignal()
+    modelSwitchesChanged = pyqtSignal(bool, bool)
 
     def __init__(self) -> None:
         super().__init__()
@@ -244,7 +318,7 @@ class MainWindow(QMainWindow):
         metrics_grid.setHorizontalSpacing(12)
         metrics_grid.setVerticalSpacing(12)
 
-        card1, self.lbl_total_actions = self._create_metric_card("总识别动作数", "0")
+        card1, self.lbl_realtime_fps = self._create_metric_card("实时帧数", "0.0 FPS")
         card2, self.lbl_avg_conf = self._create_metric_card("平均置信度", "0.0%")
         card3, self.lbl_valid_pose = self._create_metric_card("有效姿态帧数", "0")
         card4, self.lbl_valid_track = self._create_metric_card("有效轨迹帧数", "0")
@@ -259,6 +333,7 @@ class MainWindow(QMainWindow):
 
         self._build_overview_tab()
         self._build_pose_tab()
+        self._build_settings_tab()
         self._build_log_tab()
 
         analytics_layout.addLayout(metrics_grid)
@@ -332,6 +407,80 @@ class MainWindow(QMainWindow):
         logs_layout.addWidget(self.log_console)
         self.tabs.addTab(tab_logs, "日志")
 
+    def _build_settings_tab(self) -> None:
+        tab_settings = QWidget()
+        settings_layout = QVBoxLayout(tab_settings)
+        settings_layout.setContentsMargins(12, 12, 12, 12)
+        settings_layout.setSpacing(12)
+
+        section_header = QHBoxLayout()
+        section_title = QLabel("模型设置")
+        section_title.setObjectName("sectionTitle")
+        section_note = QLabel("应用后重新加载推理模型")
+        section_note.setObjectName("sectionNote")
+        section_header.addWidget(section_title)
+        section_header.addStretch(1)
+        section_header.addWidget(section_note)
+
+        settings_frame = QFrame()
+        settings_frame.setObjectName("emptyStateCard")
+        settings_frame_layout = QGridLayout(settings_frame)
+        settings_frame_layout.setContentsMargins(18, 18, 18, 18)
+        settings_frame_layout.setHorizontalSpacing(10)
+        settings_frame_layout.setVerticalSpacing(12)
+
+        pose_label = QLabel("骨骼模型")
+        pose_label.setObjectName("styleLabel")
+        self.pose_model_enabled = ToggleSwitch("启用骨骼模型")
+        self.pose_model_enabled.setChecked(True)
+        self.pose_model_edit = QLineEdit()
+        self.pose_model_edit.setObjectName("modelPathEdit")
+        self.pose_model_edit.setPlaceholderText("选择骨骼/姿态模型权重文件")
+        self.btn_browse_pose_model = QPushButton("浏览")
+        self.btn_browse_pose_model.setObjectName("btnBrowsePoseModel")
+        self.btn_browse_pose_model.clicked.connect(self.poseModelBrowseRequested.emit)
+
+        track_label = QLabel("球轨迹模型")
+        track_label.setObjectName("styleLabel")
+        self.track_model_enabled = ToggleSwitch("启用球轨迹模型")
+        self.track_model_enabled.setChecked(True)
+        self.track_model_edit = QLineEdit()
+        self.track_model_edit.setObjectName("modelPathEdit")
+        self.track_model_edit.setPlaceholderText("选择球轨迹模型权重文件")
+        self.btn_browse_track_model = QPushButton("浏览")
+        self.btn_browse_track_model.setObjectName("btnBrowseTrackModel")
+        self.btn_browse_track_model.clicked.connect(self.trackModelBrowseRequested.emit)
+
+        settings_frame_layout.addWidget(pose_label, 0, 0)
+        settings_frame_layout.addWidget(self.pose_model_enabled, 0, 1)
+        settings_frame_layout.addWidget(self.pose_model_edit, 0, 2)
+        settings_frame_layout.addWidget(self.btn_browse_pose_model, 0, 3)
+        settings_frame_layout.addWidget(track_label, 1, 0)
+        settings_frame_layout.addWidget(self.track_model_enabled, 1, 1)
+        settings_frame_layout.addWidget(self.track_model_edit, 1, 2)
+        settings_frame_layout.addWidget(self.btn_browse_track_model, 1, 3)
+        settings_frame_layout.setColumnStretch(2, 1)
+
+        self.pose_model_enabled.stateChanged.connect(self._emit_model_switches_changed)
+        self.track_model_enabled.stateChanged.connect(self._emit_model_switches_changed)
+
+        action_row = QHBoxLayout()
+        action_row.addStretch(1)
+        self.btn_model_defaults = QPushButton("恢复默认")
+        self.btn_model_defaults.setObjectName("btnModelDefaults")
+        self.btn_apply_model_settings = QPushButton("应用设置")
+        self.btn_apply_model_settings.setObjectName("btnApplyModelSettings")
+        self.btn_model_defaults.clicked.connect(self.modelSettingsDefaultsRequested.emit)
+        self.btn_apply_model_settings.clicked.connect(self._emit_model_settings_apply)
+        action_row.addWidget(self.btn_model_defaults)
+        action_row.addWidget(self.btn_apply_model_settings)
+
+        settings_layout.addLayout(section_header)
+        settings_layout.addWidget(settings_frame)
+        settings_layout.addLayout(action_row)
+        settings_layout.addStretch(1)
+        self.tabs.addTab(tab_settings, "设置")
+
     def _create_metric_card(self, title: str, value: str) -> tuple[QFrame, QLabel]:
         container = QFrame()
         container.setObjectName("metricCard")
@@ -383,6 +532,46 @@ class MainWindow(QMainWindow):
         if self.camera_device_combo.count() <= 0:
             return None
         return int(self.camera_device_combo.currentData())
+
+    def set_model_settings(self, pose_model_path: str, track_model_path: str) -> None:
+        self.pose_model_edit.setText(pose_model_path)
+        self.track_model_edit.setText(track_model_path)
+
+    def model_settings(self) -> tuple[str, str]:
+        return self.pose_model_edit.text().strip(), self.track_model_edit.text().strip()
+
+    def set_model_switches(self, pose_enabled: bool, track_enabled: bool) -> None:
+        self.pose_model_enabled.blockSignals(True)
+        self.track_model_enabled.blockSignals(True)
+        self.pose_model_enabled.setChecked(pose_enabled)
+        self.track_model_enabled.setChecked(track_enabled)
+        self.pose_model_enabled.blockSignals(False)
+        self.track_model_enabled.blockSignals(False)
+
+    def model_switches(self) -> tuple[bool, bool]:
+        return self.pose_model_enabled.isChecked(), self.track_model_enabled.isChecked()
+
+    def set_model_settings_enabled(self, enabled: bool) -> None:
+        widgets = (
+            self.pose_model_enabled,
+            self.track_model_enabled,
+            self.pose_model_edit,
+            self.track_model_edit,
+            self.btn_browse_pose_model,
+            self.btn_browse_track_model,
+            self.btn_model_defaults,
+            self.btn_apply_model_settings,
+        )
+        for widget in widgets:
+            widget.setEnabled(enabled)
+
+    def _emit_model_settings_apply(self) -> None:
+        pose_model_path, track_model_path = self.model_settings()
+        self.modelSettingsApplyRequested.emit(pose_model_path, track_model_path)
+
+    def _emit_model_switches_changed(self) -> None:
+        pose_enabled, track_enabled = self.model_switches()
+        self.modelSwitchesChanged.emit(pose_enabled, track_enabled)
 
     def show_video_frame(self, image, position_ms: int, duration_ms: int) -> None:
         self.video_player.display_image(image)
@@ -439,7 +628,7 @@ class MainWindow(QMainWindow):
     def reset_analysis(self) -> None:
         self.progress_bar.setValue(0)
         self.table_actions.setRowCount(0)
-        self.lbl_total_actions.setText("0")
+        self.lbl_realtime_fps.setText("0.0 FPS")
         self.lbl_avg_conf.setText("0.0%")
         self.lbl_valid_pose.setText("0")
         self.lbl_valid_track.setText("0")

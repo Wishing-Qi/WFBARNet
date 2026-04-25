@@ -76,7 +76,7 @@ class UnifiedRunner:
         track_filter = BallTrackFilter()
         for frame_id, frame, window in tqdm(list(iter_frame_windows(frames)), desc="Unified inference"):
             pose = self.pose_branch.infer(frame)
-            _, raw_track = self.track_branch.infer(window)
+            raw_track = self.track_branch.infer_result(window)
             track = track_filter.update(raw_track)
             outputs.append(FrameResult(frame_id=frame_id, pose=pose, track=track))
         return outputs
@@ -103,7 +103,7 @@ class UnifiedRunner:
                 desc="Unified inference",
             ):
                 pose = self.pose_branch.infer(frame)
-                _, raw_track = self.track_branch.infer(window)
+                raw_track = self.track_branch.infer_result(window)
                 track = track_filter.update(raw_track)
                 result = FrameResult(frame_id=frame_id, pose=pose, track=track)
                 outputs.append(result)
@@ -126,7 +126,7 @@ class UnifiedRunner:
             with torch.cuda.stream(pose_stream):
                 pose = self.pose_branch.infer(frame)
             with torch.cuda.stream(track_stream):
-                _, raw_track = self.track_branch.infer(window)
+                raw_track = self.track_branch.infer_result(window)
             torch.cuda.synchronize()
             track = track_filter.update(raw_track)
             outputs.append(FrameResult(frame_id=frame_id, pose=pose, track=track))

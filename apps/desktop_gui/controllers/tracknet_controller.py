@@ -194,7 +194,7 @@ def run_tracknet_task(
         nonlocal last_frame
         if not batch_windows:
             return
-        _, batch_tracks = branch.infer_batch(batch_windows)
+        batch_tracks = branch.infer_batch_results(batch_windows)
 
         for frame_id, curr_frame, track in zip(batch_ids, batch_frames, batch_tracks):
             frame_result = FrameResult(frame_id=frame_id, pose=[], track=track)

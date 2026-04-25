@@ -215,10 +215,7 @@ class AnalysisService:
 
             # Track 推理（FP16 已在 TrackBranch 内部处理）
             from src.postprocess.track import decode_track_heatmap_batch
-            if track_branch._use_amp:
-                tensor = tensor.half()
-            with torch.no_grad():
-                heatmaps = track_branch.model(tensor).float().detach().cpu().numpy()
+            heatmaps = track_branch.predict_heatmap_planes(tensor)
             raw_track_results = decode_track_heatmap_batch(heatmaps, metas, track_branch.score_thr)
             track_results = [track_filter.update(track) for track in raw_track_results]
 

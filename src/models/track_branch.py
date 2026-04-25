@@ -8,6 +8,7 @@ import warnings
 import numpy as np
 import torch
 
+from src.models.tensorrt_track_backend import TensorRTTrackBackend
 from src.models.tracknet_v3 import TrackNetV3
 from src.postprocess.track import decode_track_heatmap, decode_track_heatmap_batch
 from src.preprocess.track import preprocess_track_window, preprocess_track_batch
@@ -25,10 +26,23 @@ class TrackBranch:
 
     def __post_init__(self) -> None:
         self.device = resolve_device(self.device)
+        self.backend_name = self._resolve_backend_name()
+        if self.backend_name == "tensorrt":
+            self._use_amp = False
+            self._use_channels_last = False
+            self.model = TensorRTTrackBackend(str(self.model_weight), self.device)
+            return
+
         self._use_amp = "cuda" in self.device
+        self._use_channels_last = self._use_amp and torch.cuda.is_available()
         self.model = TrackNetV3().to(self.device).eval()
         if self._use_amp:
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cudnn.allow_tf32 = True
+            torch.backends.cuda.matmul.allow_tf32 = True
             self.model = self.model.half()
+        if self._use_channels_last:
+            self.model = self.model.to(memory_format=torch.channels_last)
         if self.model_weight and Path(self.model_weight).exists():
             state = torch.load(self.model_weight, map_location=self.device)
             if isinstance(state, dict) and "model_state_dict" in state:
@@ -51,20 +65,72 @@ class TrackBranch:
                 )
             warnings.warn(f"{message}. Running with random weights.", stacklevel=2)
 
-    @torch.no_grad()
-    def infer(self, frames: Sequence[np.ndarray]) -> tuple[np.ndarray, TrackResult]:
-        tensor, meta = preprocess_track_window(frames, self.input_size, self.device)
+    def _resolve_backend_name(self) -> str:
+        suffix = Path(self.model_weight).suffix.lower() if self.model_weight else ""
+        if suffix == ".engine":
+            return "tensorrt"
+        return "pytorch"
+
+    def _prepare_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
         if self._use_amp:
             tensor = tensor.half()
+        if self._use_channels_last:
+            tensor = tensor.contiguous(memory_format=torch.channels_last)
+        return tensor
+
+    @torch.inference_mode()
+    def infer(self, frames: Sequence[np.ndarray]) -> tuple[np.ndarray, TrackResult]:
+        tensor, meta = preprocess_track_window(frames, self.input_size, self.device)
+        if self.backend_name == "tensorrt":
+            heatmaps = self.model.infer(tensor)
+            decoded = decode_track_heatmap(heatmaps, meta, self.score_thr)
+            return heatmaps, decoded
+
+        tensor = self._prepare_tensor(tensor)
         heatmaps = self.model(tensor).float().detach().cpu().numpy()
         decoded = decode_track_heatmap(heatmaps, meta, self.score_thr)
         return heatmaps, decoded
 
-    @torch.no_grad()
+    @torch.inference_mode()
+    def infer_result(self, frames: Sequence[np.ndarray]) -> TrackResult:
+        tensor, meta = preprocess_track_window(frames, self.input_size, self.device)
+        heatmap = self.predict_heatmap_planes(tensor).squeeze(0)
+        return decode_track_heatmap(heatmap, meta, self.score_thr)
+
+    @torch.inference_mode()
     def infer_batch(self, batch_frames: list[Sequence[np.ndarray]]) -> tuple[np.ndarray, list[TrackResult]]:
         tensor, metas = preprocess_track_batch(batch_frames, self.input_size, self.device)
-        if self._use_amp:
-            tensor = tensor.half()
+        if self.backend_name == "tensorrt":
+            heatmaps = self._infer_tensorrt_batch(tensor)
+            decoded_batch = decode_track_heatmap_batch(heatmaps, metas, self.score_thr)
+            return heatmaps, decoded_batch
+
+        tensor = self._prepare_tensor(tensor)
         heatmaps = self.model(tensor).float().detach().cpu().numpy()
         decoded_batch = decode_track_heatmap_batch(heatmaps, metas, self.score_thr)
         return heatmaps, decoded_batch
+
+    @torch.inference_mode()
+    def infer_batch_results(self, batch_frames: list[Sequence[np.ndarray]]) -> list[TrackResult]:
+        tensor, metas = preprocess_track_batch(batch_frames, self.input_size, self.device)
+        heatmaps = self.predict_heatmap_planes(tensor)
+        return decode_track_heatmap_batch(heatmaps, metas, self.score_thr)
+
+    @torch.inference_mode()
+    def predict_heatmap_planes(self, tensor: torch.Tensor) -> np.ndarray:
+        if self.backend_name == "tensorrt":
+            heatmaps = self._infer_tensorrt_batch(tensor)
+            if heatmaps.ndim == 4:
+                return heatmaps[:, 1]
+            if heatmaps.ndim == 3:
+                return heatmaps
+            raise ValueError(f"Unexpected TensorRT heatmap shape: {heatmaps.shape}")
+
+        tensor = self._prepare_tensor(tensor)
+        return self.model(tensor)[:, 1].float().detach().cpu().numpy()
+
+    def _infer_tensorrt_batch(self, tensor: torch.Tensor) -> np.ndarray:
+        if tensor.shape[0] <= 1:
+            return self.model.infer(tensor)
+        outputs = [self.model.infer(tensor[index : index + 1]) for index in range(tensor.shape[0])]
+        return np.concatenate(outputs, axis=0)

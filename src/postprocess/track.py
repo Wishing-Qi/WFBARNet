@@ -87,6 +87,8 @@ def decode_track_heatmap(
         heatmap = heatmaps[0, 1]
     elif heatmaps.ndim == 3:
         heatmap = heatmaps[1]
+    elif heatmaps.ndim == 2:
+        heatmap = heatmaps
     else:
         raise ValueError(f"Unexpected heatmap shape: {heatmaps.shape}")
 
@@ -98,16 +100,20 @@ def decode_track_heatmap_batch(
     metas: list[TrackPreprocessMeta],
     score_thr: float,
 ) -> list[TrackResult]:
-    if batch_heatmaps.ndim != 4:
-        raise ValueError(f"Batch heatmaps must be 4D, got {batch_heatmaps.ndim}D")
+    if batch_heatmaps.ndim == 4:
+        heatmap_planes = batch_heatmaps[:, 1]
+    elif batch_heatmaps.ndim == 3:
+        heatmap_planes = batch_heatmaps
+    else:
+        raise ValueError(f"Batch heatmaps must be 3D or 4D, got {batch_heatmaps.ndim}D")
 
-    batch_size = batch_heatmaps.shape[0]
+    batch_size = heatmap_planes.shape[0]
     if batch_size != len(metas):
         raise ValueError(f"Heatmap batch size {batch_size} doesn't match metas length {len(metas)}")
 
     results = []
     for i in range(batch_size):
-        heatmap = batch_heatmaps[i, 1]
+        heatmap = heatmap_planes[i]
         meta = metas[i]
 
         results.append(_decode_single_heatmap(heatmap, meta, score_thr))
