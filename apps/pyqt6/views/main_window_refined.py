@@ -588,8 +588,8 @@ class MainWindow(QMainWindow):
         pose_enabled, track_enabled = self.model_switches()
         self.modelSwitchesChanged.emit(pose_enabled, track_enabled)
 
-    def show_video_frame(self, image, position_ms: int, duration_ms: int) -> None:
-        self.video_player.display_image(image)
+    def show_video_frame(self, image, position_ms: int, duration_ms: int, court=None) -> None:
+        self.video_player.display_image(image, court=court)
         self.video_timeline.set_duration(duration_ms)
         self.video_timeline.set_position(position_ms)
 

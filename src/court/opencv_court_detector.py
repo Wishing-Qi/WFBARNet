@@ -102,6 +102,154 @@ class CourtLinePrediction:
         }
 
 
+@dataclass(slots=True)
+class _CourtOverlayCache:
+    prediction: CourtLinePrediction
+    frame_size: tuple[int, int]
+    mask_alpha: float
+    line_thickness: int
+    show_keypoints: bool
+    roi: tuple[int, int, int, int]
+    premultiplied_overlay: np.ndarray
+    inverse_alpha: np.ndarray
+
+
+class CourtLineOverlayRenderer:
+    """Caches court-line drawing as a transparent overlay."""
+
+    def __init__(
+        self,
+        *,
+        mask_alpha: float = 0.14,
+        line_thickness: int = 3,
+        show_keypoints: bool = False,
+    ) -> None:
+        self.mask_alpha = float(mask_alpha)
+        self.line_thickness = int(line_thickness)
+        self.show_keypoints = bool(show_keypoints)
+        self._cache: _CourtOverlayCache | None = None
+
+    def reset(self) -> None:
+        self._cache = None
+
+    def draw(self, frame: np.ndarray, prediction: CourtLinePrediction | None) -> np.ndarray:
+        canvas = frame.copy()
+        return self.draw_on(canvas, prediction)
+
+    def draw_on(self, frame: np.ndarray, prediction: CourtLinePrediction | None) -> np.ndarray:
+        if prediction is None or not prediction.valid or not prediction.projected_lines:
+            return frame
+        if frame is None or frame.ndim != 3 or frame.shape[2] < 3:
+            return frame
+
+        height, width = frame.shape[:2]
+        cache = self._ensure_cache(prediction, (int(width), int(height)))
+        if cache is None:
+            return frame
+
+        x1, y1, x2, y2 = cache.roi
+        frame_roi = frame[y1:y2, x1:x2, :3]
+        if frame_roi.shape[:2] != cache.inverse_alpha.shape[:2]:
+            self.reset()
+            return frame
+
+        blended = frame_roi.astype(np.float32)
+        blended *= cache.inverse_alpha
+        blended += cache.premultiplied_overlay
+        np.clip(blended, 0.0, 255.0, out=blended)
+        np.rint(blended, out=blended)
+        frame_roi[:] = blended.astype(np.uint8)
+        return frame
+
+    def _ensure_cache(
+        self,
+        prediction: CourtLinePrediction,
+        frame_size: tuple[int, int],
+    ) -> _CourtOverlayCache | None:
+        mask_alpha = float(np.clip(self.mask_alpha, 0.0, 1.0))
+        line_thickness = max(1, int(self.line_thickness))
+        show_keypoints = bool(self.show_keypoints)
+
+        cache = self._cache
+        if (
+            cache is not None
+            and cache.prediction is prediction
+            and cache.frame_size == frame_size
+            and cache.mask_alpha == mask_alpha
+            and cache.line_thickness == line_thickness
+            and cache.show_keypoints == show_keypoints
+        ):
+            return cache
+
+        cache = self._build_cache(
+            prediction,
+            frame_size,
+            mask_alpha=mask_alpha,
+            line_thickness=line_thickness,
+            show_keypoints=show_keypoints,
+        )
+        self._cache = cache
+        return cache
+
+    def _build_cache(
+        self,
+        prediction: CourtLinePrediction,
+        frame_size: tuple[int, int],
+        *,
+        mask_alpha: float,
+        line_thickness: int,
+        show_keypoints: bool,
+    ) -> _CourtOverlayCache | None:
+        width, height = frame_size
+        if width <= 0 or height <= 0:
+            return None
+
+        black = np.zeros((height, width, 3), dtype=np.uint8)
+        white = np.full((height, width, 3), 255, dtype=np.uint8)
+        _draw_court_prediction_direct(
+            black,
+            prediction,
+            mask_alpha=mask_alpha,
+            line_thickness=line_thickness,
+            show_keypoints=show_keypoints,
+        )
+        _draw_court_prediction_direct(
+            white,
+            prediction,
+            mask_alpha=mask_alpha,
+            line_thickness=line_thickness,
+            show_keypoints=show_keypoints,
+        )
+
+        black_f = black.astype(np.float32)
+        white_f = white.astype(np.float32)
+        inverse_alpha_2d = np.clip((white_f - black_f).mean(axis=2) / 255.0, 0.0, 1.0)
+        alpha_2d = 1.0 - inverse_alpha_2d
+        ys, xs = np.nonzero(alpha_2d > (1.0 / 255.0))
+        if xs.size == 0 or ys.size == 0:
+            return None
+
+        x1 = max(0, int(xs.min()))
+        x2 = min(width, int(xs.max()) + 1)
+        y1 = max(0, int(ys.min()))
+        y2 = min(height, int(ys.max()) + 1)
+        if x1 >= x2 or y1 >= y2:
+            return None
+
+        roi_black = black_f[y1:y2, x1:x2].copy()
+        roi_inverse_alpha = inverse_alpha_2d[y1:y2, x1:x2, None].astype(np.float32)
+        return _CourtOverlayCache(
+            prediction=prediction,
+            frame_size=frame_size,
+            mask_alpha=mask_alpha,
+            line_thickness=line_thickness,
+            show_keypoints=show_keypoints,
+            roi=(x1, y1, x2, y2),
+            premultiplied_overlay=roi_black,
+            inverse_alpha=roi_inverse_alpha,
+        )
+
+
 class OpenCVCourtLineDetector:
     def __init__(self, config: OpenCVCourtLineConfig | None = None) -> None:
         self.config = config or OpenCVCourtLineConfig()
@@ -231,10 +379,28 @@ def draw_court_prediction(
     line_thickness: int = 3,
     show_keypoints: bool = False,
 ) -> np.ndarray:
-    if not prediction.valid or not prediction.projected_lines:
-        return frame.copy()
-
     canvas = frame.copy()
+    _draw_court_prediction_direct(
+        canvas,
+        prediction,
+        mask_alpha=mask_alpha,
+        line_thickness=line_thickness,
+        show_keypoints=show_keypoints,
+    )
+    return canvas
+
+
+def _draw_court_prediction_direct(
+    canvas: np.ndarray,
+    prediction: CourtLinePrediction,
+    *,
+    mask_alpha: float = 0.14,
+    line_thickness: int = 3,
+    show_keypoints: bool = False,
+) -> np.ndarray:
+    if not prediction.valid or not prediction.projected_lines:
+        return canvas
+
     outer = prediction.projected_lines.get("doubles_outer")
     if outer and mask_alpha > 0.0:
         polygon = np.asarray(outer, dtype=np.float32).reshape(-1, 2)

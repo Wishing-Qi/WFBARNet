@@ -48,6 +48,15 @@ class TrackTrailRenderer:
         timestamp_ms: int | None = None,
     ) -> np.ndarray:
         canvas = frame.copy()
+        return self.draw_on(canvas, result, timestamp_ms=timestamp_ms)
+
+    def draw_on(
+        self,
+        canvas: np.ndarray,
+        result: FrameResult,
+        *,
+        timestamp_ms: int | None = None,
+    ) -> np.ndarray:
         _draw_pose(canvas, result)
 
         timestamp_s = self._timestamp_seconds(result.frame_id, timestamp_ms)

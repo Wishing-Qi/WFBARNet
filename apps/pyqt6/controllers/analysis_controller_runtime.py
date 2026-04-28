@@ -23,7 +23,6 @@ from src.models.pose_branch import PoseBranch
 from src.models.track_branch import TrackBranch
 from src.utils.structures import FrameResult, TrackResult
 from src.utils.visualize import TrackTrailRenderer
-from src.court.opencv_court_detector import draw_court_prediction
 
 
 DISPLAY_FPS_LIMIT = 60.0
@@ -320,12 +319,8 @@ class TrackNetPlaybackWorker(QThread):
                 image = None
                 if should_emit:
                     frame_result = FrameResult(frame_id=frame_id, pose=last_pose, track=track)
-                    display_frame = (
-                        draw_court_prediction(current_frame, court_prediction)
-                        if court_prediction is not None
-                        else current_frame
-                    )
-                    vis_frame = trail_renderer.draw(display_frame, frame_result, timestamp_ms=current_ms)
+                    vis_frame = current_frame.copy()
+                    trail_renderer.draw_on(vis_frame, frame_result, timestamp_ms=current_ms)
                     image = frame_to_qimage(vis_frame)
 
                 target_ms = max(0, current_ms - base_ms)
@@ -521,12 +516,8 @@ class CameraInferenceWorker(QThread):
                 avg_score = score_sum / max(processed_frames, 1)
                 if position_ms >= next_display_ms:
                     frame_result = FrameResult(frame_id=current_frame_id, pose=last_pose, track=track)
-                    display_frame = (
-                        draw_court_prediction(current_frame, court_prediction)
-                        if court_prediction is not None
-                        else current_frame
-                    )
-                    vis_frame = trail_renderer.draw(display_frame, frame_result, timestamp_ms=position_ms)
+                    vis_frame = current_frame.copy()
+                    trail_renderer.draw_on(vis_frame, frame_result, timestamp_ms=position_ms)
                     image = frame_to_qimage(vis_frame)
 
                     payload = {
@@ -1123,6 +1114,7 @@ class MainController:
                 image,
                 int(payload.get("position_ms", 0)),
                 int(payload.get("duration_ms", 0)),
+                payload.get("court"),
             )
             self._update_display_fps()
 
@@ -1157,7 +1149,7 @@ class MainController:
 
         image = payload.get("image")
         if isinstance(image, QImage):
-            self.view.video_player.display_image(image)
+            self.view.video_player.display_image(image, court=payload.get("court"))
             self._update_display_fps()
         if not self._should_update_metrics_text():
             return

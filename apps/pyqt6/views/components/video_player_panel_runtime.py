@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer
-from PyQt6.QtGui import QImage, QPixmap
+from math import isfinite
+from typing import Any
+
+from PyQt6.QtCore import QPointF, QRect, QSize, Qt, pyqtSignal, QTimer
+from PyQt6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QPolygonF
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -15,6 +18,178 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+
+class CourtLineOverlayWidget(QWidget):
+    """Transparent cached overlay for court lines in label coordinates."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAutoFillBackground(False)
+
+        self._court: dict[str, Any] | None = None
+        self._court_key: tuple[Any, ...] | None = None
+        self._source_size = QSize()
+        self._display_rect = QRect()
+        self._cached_pixmap: QPixmap | None = None
+        self._dirty = True
+        self._mask_alpha = 0.14
+        self._line_thickness = 3.0
+
+    def clear(self) -> None:
+        if self._court is None and self._cached_pixmap is None:
+            return
+        self._court = None
+        self._court_key = None
+        self._cached_pixmap = None
+        self._dirty = True
+        self.update()
+
+    def set_court(self, court: object | None) -> None:
+        court_dict = self._normalize_court(court)
+        court_key = self._make_court_key(court_dict)
+        if court_key == self._court_key:
+            return
+        self._court = court_dict
+        self._court_key = court_key
+        self._dirty = True
+        self.update()
+
+    def set_video_geometry(self, source_size: QSize, display_rect: QRect) -> None:
+        if source_size == self._source_size and display_rect == self._display_rect:
+            return
+        self._source_size = QSize(source_size)
+        self._display_rect = QRect(display_rect)
+        self._dirty = True
+        self.update()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._dirty = True
+
+    def paintEvent(self, event) -> None:
+        if self._dirty:
+            self._rebuild_cache()
+        if self._cached_pixmap is None or self._cached_pixmap.isNull():
+            return
+        painter = QPainter(self)
+        painter.drawPixmap(0, 0, self._cached_pixmap)
+
+    def _rebuild_cache(self) -> None:
+        self._dirty = False
+        if self.width() <= 0 or self.height() <= 0:
+            self._cached_pixmap = None
+            return
+
+        pixmap = QPixmap(self.size())
+        pixmap.fill(Qt.GlobalColor.transparent)
+        self._cached_pixmap = pixmap
+
+        court = self._court
+        projected_lines = court.get("projected_lines") if isinstance(court, dict) else None
+        if (
+            not isinstance(court, dict)
+            or not court.get("valid")
+            or not isinstance(projected_lines, dict)
+            or self._source_size.width() <= 0
+            or self._source_size.height() <= 0
+            or self._display_rect.width() <= 0
+            or self._display_rect.height() <= 0
+        ):
+            return
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setClipRect(self._display_rect)
+        painter.translate(self._display_rect.topLeft())
+        scale_x = self._display_rect.width() / max(1, self._source_size.width())
+        scale_y = self._display_rect.height() / max(1, self._source_size.height())
+        painter.scale(scale_x, scale_y)
+
+        outer = projected_lines.get("doubles_outer")
+        outer_polygon = self._polygon_from_points(outer)
+        if outer_polygon.count() >= 3 and self._mask_alpha > 0.0:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(90, 210, 35, int(max(0.0, min(self._mask_alpha, 1.0)) * 255)))
+            painter.drawPolygon(outer_polygon)
+
+        dark_pen = QPen(QColor(25, 65, 0), self._line_thickness + 3.0)
+        bright_pen = QPen(QColor(110, 245, 40), self._line_thickness)
+        for pen in (dark_pen, bright_pen):
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for name, points in projected_lines.items():
+            polygon = self._polygon_from_points(points)
+            if polygon.count() < 2:
+                continue
+            is_closed = name == "doubles_outer"
+            painter.setPen(dark_pen)
+            self._draw_line_shape(painter, polygon, is_closed)
+            painter.setPen(bright_pen)
+            self._draw_line_shape(painter, polygon, is_closed)
+        painter.end()
+
+    def _normalize_court(self, court: object | None) -> dict[str, Any] | None:
+        if court is None:
+            return None
+        if isinstance(court, dict):
+            return court
+        to_dict = getattr(court, "to_dict", None)
+        if callable(to_dict):
+            value = to_dict()
+            return value if isinstance(value, dict) else None
+        return None
+
+    def _make_court_key(self, court: dict[str, Any] | None) -> tuple[Any, ...] | None:
+        if not isinstance(court, dict) or not court.get("valid"):
+            return None
+        projected_lines = court.get("projected_lines")
+        if not isinstance(projected_lines, dict):
+            return None
+        line_items = []
+        for name in sorted(projected_lines):
+            points = []
+            for point in projected_lines.get(name) or []:
+                if not isinstance(point, (list, tuple)) or len(point) < 2:
+                    continue
+                try:
+                    x = float(point[0])
+                    y = float(point[1])
+                except (TypeError, ValueError):
+                    continue
+                if isfinite(x) and isfinite(y):
+                    points.append((round(x, 2), round(y, 2)))
+            line_items.append((str(name), tuple(points)))
+        return (
+            tuple(court.get("source_size") or ()),
+            tuple(line_items),
+        )
+
+    def _polygon_from_points(self, points: object) -> QPolygonF:
+        polygon = QPolygonF()
+        if not isinstance(points, (list, tuple)):
+            return polygon
+        for point in points:
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
+                continue
+            try:
+                x = float(point[0])
+                y = float(point[1])
+            except (TypeError, ValueError):
+                continue
+            if isfinite(x) and isfinite(y):
+                polygon.append(QPointF(x, y))
+        return polygon
+
+    def _draw_line_shape(self, painter: QPainter, polygon: QPolygonF, closed: bool) -> None:
+        if closed:
+            painter.drawPolygon(polygon)
+        else:
+            painter.drawPolyline(polygon)
 
 
 class VideoPlayerWidget(QFrame):
@@ -88,6 +263,9 @@ class VideoPlayerWidget(QFrame):
             QSizePolicy.Policy.Expanding,
         )
         self.video_label.setMinimumSize(320, 240)
+        self.court_overlay = CourtLineOverlayWidget(self.video_label)
+        self.court_overlay.setGeometry(self.video_label.rect())
+        self.court_overlay.raise_()
 
         self.preview_stack.addWidget(placeholder_page)
         self.preview_stack.addWidget(self.video_label)
@@ -104,6 +282,8 @@ class VideoPlayerWidget(QFrame):
 
     def _render_current_pixmap(self) -> None:
         if self._current_pixmap is None:
+            self.court_overlay.setGeometry(self.video_label.rect())
+            self.court_overlay.set_video_geometry(QSize(), QRect())
             return
         label_size = self.video_label.size()
         if label_size.width() <= 0 or label_size.height() <= 0:
@@ -117,6 +297,15 @@ class VideoPlayerWidget(QFrame):
             Qt.TransformationMode.SmoothTransformation,
         )
         self.video_label.setPixmap(scaled)
+        self.court_overlay.setGeometry(self.video_label.rect())
+        display_rect = QRect(
+            (self.video_label.width() - scaled.width()) // 2,
+            (self.video_label.height() - scaled.height()) // 2,
+            scaled.width(),
+            scaled.height(),
+        )
+        self.court_overlay.set_video_geometry(self._current_pixmap.size(), display_rect)
+        self.court_overlay.raise_()
 
     def _set_status(self, text: str, state: str) -> None:
         if text == self._status_text and state == self._status_state:
@@ -131,12 +320,13 @@ class VideoPlayerWidget(QFrame):
             self.style().polish(self.video_label)
             self.video_label.update()
 
-    def display_image(self, image: QImage) -> None:
+    def display_image(self, image: QImage, court: object | None = None) -> None:
         if image.isNull():
             return
         self._current_pixmap = QPixmap.fromImage(image)
         if self.preview_stack.currentWidget() is not self.video_label:
             self.preview_stack.setCurrentWidget(self.video_label)
+        self.court_overlay.set_court(court)
         self._render_current_pixmap()
         self._set_status("帧已就绪", "loaded")
 
@@ -156,6 +346,8 @@ class VideoPlayerWidget(QFrame):
         self.path_edit.clear()
         self.path_edit.setToolTip("")
         self.video_label.clear()
+        self.court_overlay.clear()
+        self.court_overlay.set_video_geometry(QSize(), QRect())
         self._set_status("未加载视频", "idle")
         self.preview_stack.setCurrentWidget(self.preview_stack.widget(0))
 
