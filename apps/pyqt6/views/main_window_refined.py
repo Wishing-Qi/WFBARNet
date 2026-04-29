@@ -37,6 +37,7 @@ from apps.pyqt6.views.components.video_player_panel_runtime import (
     VideoPlayerWidget,
     VideoTimelineWidget,
 )
+from apps.pyqt6.views.heatmap_renderer import HeatmapRenderer, HeatmapRenderConfig
 
 
 class ToggleSwitch(QCheckBox):
@@ -105,7 +106,200 @@ class ToggleSwitch(QCheckBox):
         painter.drawEllipse(knob_rect)
 
 
-class BadmintonCourtWidget(QWidget):
+class StrokePieChartWidget(QWidget):
+    COLORS = (
+        "#2563EB",
+        "#DC2626",
+        "#16A34A",
+        "#F59E0B",
+        "#7C3AED",
+        "#0891B2",
+        "#DB2777",
+        "#65A30D",
+        "#EA580C",
+        "#4F46E5",
+        "#0D9488",
+        "#BE123C",
+    )
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._counts: dict[str, int] = {}
+        self._colors_by_label: dict[str, QColor] = {}
+        self.setObjectName("strokePieChart")
+        self.setMinimumSize(320, 260)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+    def set_counts(self, counts: dict[str, int]) -> None:
+        cleaned: dict[str, int] = {}
+        for label, count in counts.items():
+            name = str(label).strip() or "未知"
+            value = max(0, int(count))
+            if value > 0:
+                cleaned[name] = cleaned.get(name, 0) + value
+                self._ensure_color(name)
+        self._counts = cleaned
+        self.update()
+
+    def increment(self, label: str, amount: int = 1) -> None:
+        name = str(label).strip() or "未知"
+        value = max(0, int(amount))
+        if value <= 0:
+            return
+        self._ensure_color(name)
+        self._counts[name] = self._counts.get(name, 0) + value
+        self.update()
+
+    def clear_counts(self) -> None:
+        self._counts.clear()
+        self.update()
+
+    def total_count(self) -> int:
+        return sum(self._counts.values())
+
+    def counts(self) -> dict[str, int]:
+        return dict(self._counts)
+
+    def paintEvent(self, event) -> None:
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        bounds = QRectF(self.rect()).adjusted(14, 14, -14, -14)
+        total = self.total_count()
+        if total <= 0:
+            self._draw_empty_state(painter, bounds)
+            return
+
+        items = sorted(self._counts.items(), key=lambda item: (-item[1], item[0]))
+        chart_rect, legend_rect = self._layout_rects(bounds)
+        self._draw_pie(painter, chart_rect, items, total)
+        self._draw_legend(painter, legend_rect, items, total)
+
+    def _layout_rects(self, bounds: QRectF) -> tuple[QRectF, QRectF]:
+        if bounds.width() >= 430:
+            side = min(bounds.height(), bounds.width() * 0.42)
+            chart = QRectF(
+                bounds.left(),
+                bounds.top() + (bounds.height() - side) / 2.0,
+                side,
+                side,
+            )
+            legend = QRectF(
+                chart.right() + 24,
+                bounds.top(),
+                max(1.0, bounds.right() - chart.right() - 24),
+                bounds.height(),
+            )
+            return chart, legend
+
+        side = min(bounds.width() * 0.78, bounds.height() * 0.56)
+        chart = QRectF(
+            bounds.left() + (bounds.width() - side) / 2.0,
+            bounds.top(),
+            side,
+            side,
+        )
+        legend = QRectF(
+            bounds.left(),
+            chart.bottom() + 16,
+            bounds.width(),
+            max(1.0, bounds.bottom() - chart.bottom() - 16),
+        )
+        return chart, legend
+
+    def _draw_empty_state(self, painter: QPainter, bounds: QRectF) -> None:
+        side = min(bounds.width(), bounds.height()) * 0.54
+        circle = QRectF(
+            bounds.center().x() - side / 2.0,
+            bounds.center().y() - side / 2.0,
+            side,
+            side,
+        )
+        painter.setPen(QPen(QColor("#CBD5E1"), 2))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(circle)
+        painter.setPen(QColor("#64748B"))
+        painter.drawText(bounds, Qt.AlignmentFlag.AlignCenter, "暂无击球统计")
+
+    def _draw_pie(
+        self,
+        painter: QPainter,
+        chart: QRectF,
+        items: list[tuple[str, int]],
+        total: int,
+    ) -> None:
+        painter.setPen(QPen(QColor("#FFFFFF"), 1))
+        start_angle = 90 * 16
+        used_angle = 0
+        full_angle = 360 * 16
+        for index, (label, count) in enumerate(items):
+            remaining_angle = max(0, full_angle - used_angle)
+            if index == len(items) - 1:
+                span_angle = remaining_angle
+            else:
+                span_angle = min(remaining_angle, max(1, int(round(full_angle * count / total))))
+            used_angle += span_angle
+            if span_angle <= 0:
+                continue
+            painter.setBrush(self._ensure_color(label))
+            painter.drawPie(chart, start_angle, -span_angle)
+            start_angle -= span_angle
+
+        painter.setPen(QPen(QColor("#0F172A"), 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(chart)
+
+    def _draw_legend(
+        self,
+        painter: QPainter,
+        legend: QRectF,
+        items: list[tuple[str, int]],
+        total: int,
+    ) -> None:
+        row_height = 22
+        rows_per_column = max(1, int(legend.height() // row_height))
+        column_count = max(1, min(3, (len(items) + rows_per_column - 1) // rows_per_column))
+        column_width = legend.width() / column_count
+        metrics = painter.fontMetrics()
+        text_color = self.palette().color(self.foregroundRole())
+        muted_color = QColor("#64748B")
+
+        for index, (label, count) in enumerate(items):
+            column = index // rows_per_column
+            row = index % rows_per_column
+            x = legend.left() + column * column_width
+            y = legend.top() + row * row_height
+            if y + row_height > legend.bottom() + 1:
+                break
+
+            color = self._ensure_color(label)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(color)
+            painter.drawRoundedRect(QRectF(x, y + 5, 11, 11), 3, 3)
+
+            percent = count / max(1, total) * 100.0
+            text = f"{label}  {count}次  {percent:.1f}%"
+            text = metrics.elidedText(
+                text,
+                Qt.TextElideMode.ElideRight,
+                max(40, int(column_width - 18)),
+            )
+            painter.setPen(text_color if count > 0 else muted_color)
+            painter.drawText(
+                QRectF(x + 18, y, column_width - 18, row_height),
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                text,
+            )
+
+    def _ensure_color(self, label: str) -> QColor:
+        if label not in self._colors_by_label:
+            color = QColor(self.COLORS[len(self._colors_by_label) % len(self.COLORS)])
+            self._colors_by_label[label] = color
+        return self._colors_by_label[label]
+
+
+class CourtHeatmapWidget(QWidget):
     COURT_LENGTH_MM = 13400.0
     COURT_WIDTH_MM = 6100.0
     COURT_LENGTH_CM = 1340.0
@@ -114,21 +308,56 @@ class BadmintonCourtWidget(QWidget):
     SINGLES_SIDE_MARGIN_MM = 460.0
     DOUBLE_LONG_SERVICE_FROM_BACK_MM = 760.0
     SHORT_SERVICE_FROM_NET_MM = 1980.0
-    HEATMAP_COLS = 18
-    HEATMAP_ROWS = 32
     HEATMAP_MAX_POINTS = 1600
+    HEATMAP_REFRESH_INTERVAL = 2
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._ball_court_xy: tuple[float, float] | None = None
         self._player_court_points: list[tuple[float, float]] = []
-        self._player_heatmap_points: list[tuple[float, float, int]] = []
+        self._top_player_points: list[tuple[float, float]] = []
+        self._bottom_player_points: list[tuple[float, float]] = []
+        self._show_top_heatmap = True
+        self._show_bottom_heatmap = True
+        self._show_contours = True
+        self._heatmap_opacity = 0.9
+        self._top_color_mode = "blue"
+        self._bottom_color_mode = "red"
+        self._heatmap_config = HeatmapRenderConfig(
+            sigma=20.0,
+            alpha_power=0.75,
+            min_alpha_threshold=0.015,
+            max_alpha=235,
+            contour_levels=7,
+            contour_alpha=110,
+            contour_thickness=1,
+            heatmap_opacity=self._heatmap_opacity,
+            top_color_mode=self._top_color_mode,
+            bottom_color_mode=self._bottom_color_mode,
+            show_contours=self._show_contours,
+        )
+        self._heatmap_renderer = HeatmapRenderer(
+            1,
+            1,
+            court_width=self.COURT_WIDTH_CM,
+            court_height=self.COURT_LENGTH_CM,
+            config=self._heatmap_config,
+        )
+        self._top_heatmap_pixmap = None
+        self._bottom_heatmap_pixmap = None
+        self._court_pixmap = None
+        self._heatmap_update_count = 0
         self.setObjectName("badmintonCourtPreview")
         self.setMinimumSize(320, 220)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
     def sizeHint(self) -> QSize:
         return QSize(320, 460)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self._top_player_points or self._bottom_player_points:
+            self.refresh_heatmap()
 
     def set_ball_projection(self, court_xy: tuple[float, float] | None) -> None:
         self._ball_court_xy = court_xy
@@ -137,10 +366,83 @@ class BadmintonCourtWidget(QWidget):
     def set_player_projections(self, court_points: list[tuple[float, float]] | None) -> None:
         self._player_court_points = list(court_points or [])
         self._append_player_heatmap_points(self._player_court_points)
+        self._heatmap_update_count += 1
+        if self._should_refresh_heatmap():
+            self.refresh_heatmap()
+            self._heatmap_update_count = 0
         self.update()
 
+    def set_court_pixmap(self, pixmap) -> None:
+        self._court_pixmap = pixmap
+        self.update()
+
+    def set_top_player_points(self, points: list[tuple[float, float]] | None) -> None:
+        self._top_player_points = self._filtered_court_points(points)
+        self._trim_heatmap_points()
+        self.refresh_heatmap()
+
+    def set_bottom_player_points(self, points: list[tuple[float, float]] | None) -> None:
+        self._bottom_player_points = self._filtered_court_points(points)
+        self._trim_heatmap_points()
+        self.refresh_heatmap()
+
+    def set_show_top_heatmap(self, enabled: bool) -> None:
+        self._show_top_heatmap = bool(enabled)
+        self.update()
+
+    def set_show_bottom_heatmap(self, enabled: bool) -> None:
+        self._show_bottom_heatmap = bool(enabled)
+        self.update()
+
+    def set_show_contours(self, enabled: bool) -> None:
+        self._show_contours = bool(enabled)
+        self._heatmap_config.show_contours = self._show_contours
+        self.refresh_heatmap()
+
+    def set_heatmap_opacity(self, value: float) -> None:
+        self._heatmap_opacity = max(0.0, min(float(value), 1.0))
+        self._heatmap_config.heatmap_opacity = self._heatmap_opacity
+        self.refresh_heatmap()
+
+    def set_heatmap_parameters(self, **params: float | int | str | bool) -> None:
+        for key, value in params.items():
+            if not hasattr(self._heatmap_config, key):
+                raise ValueError(f"Unsupported heatmap parameter: {key}")
+            setattr(self._heatmap_config, key, value)
+        self._top_color_mode = str(self._heatmap_config.top_color_mode)
+        self._bottom_color_mode = str(self._heatmap_config.bottom_color_mode)
+        self._show_contours = bool(self._heatmap_config.show_contours)
+        self._heatmap_opacity = float(self._heatmap_config.heatmap_opacity)
+        self.refresh_heatmap()
+
     def clear_player_heatmap(self) -> None:
-        self._player_heatmap_points.clear()
+        self._top_player_points.clear()
+        self._bottom_player_points.clear()
+        self._top_heatmap_pixmap = None
+        self._bottom_heatmap_pixmap = None
+        self._heatmap_update_count = 0
+        self.update()
+
+    def clear_heatmap(self) -> None:
+        self.clear_player_heatmap()
+
+    def refresh_heatmap(self) -> None:
+        court = self._court_rect(self.rect().adjusted(8, 8, -8, -8))
+        width = max(1, int(round(court.width())))
+        height = max(1, int(round(court.height())))
+        self._heatmap_renderer.set_size(width, height)
+        self._top_heatmap_pixmap = self._heatmap_renderer.build_heatmap_pixmap(
+            self._top_player_points,
+            color_mode=self._top_color_mode,
+            show_contours=self._show_contours,
+            opacity=self._heatmap_opacity,
+        )
+        self._bottom_heatmap_pixmap = self._heatmap_renderer.build_heatmap_pixmap(
+            self._bottom_player_points,
+            color_mode=self._bottom_color_mode,
+            show_contours=self._show_contours,
+            opacity=self._heatmap_opacity,
+        )
         self.update()
 
     def paintEvent(self, event) -> None:
@@ -156,11 +458,15 @@ class BadmintonCourtWidget(QWidget):
         court = self._court_rect(bounds)
         line_width = max(2, round(self.LINE_WIDTH_MM * self._scale(court)))
         painter.setPen(QPen(QColor("#F8FAFC"), line_width))
-        painter.setBrush(QColor("#15803D"))
-        painter.drawRect(court)
+        if self._court_pixmap is not None and not self._court_pixmap.isNull():
+            painter.drawPixmap(court.toRect(), self._court_pixmap)
+        else:
+            painter.setBrush(QColor("#15803D"))
+            painter.drawRect(court)
 
-        self._draw_player_heatmap(painter, court)
+        self._draw_heatmap_layers(painter, court)
         painter.setPen(QPen(QColor("#FFFFFF"), line_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.SquareCap))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
         self._draw_court_lines(painter, court)
         self._draw_player_projections(painter, court)
         self._draw_ball_projection(painter, court)
@@ -178,6 +484,7 @@ class BadmintonCourtWidget(QWidget):
         return QRectF(x, y, width, height)
 
     def _draw_court_lines(self, painter: QPainter, court: QRectF) -> None:
+        painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(court)
 
         y_net = self._y(court, self.COURT_LENGTH_MM / 2.0)
@@ -205,56 +512,51 @@ class BadmintonCourtWidget(QWidget):
         painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
 
     def _append_player_heatmap_points(self, court_points: list[tuple[float, float]]) -> None:
-        for index, point in enumerate(court_points):
-            if len(point) < 2:
+        filtered = self._filtered_court_points(court_points)
+        if filtered:
+            self._top_player_points.append(filtered[0])
+        if len(filtered) > 1:
+            self._bottom_player_points.append(filtered[1])
+        self._trim_heatmap_points()
+
+    def _filtered_court_points(self, court_points: list[tuple[float, float]] | None) -> list[tuple[float, float]]:
+        filtered: list[tuple[float, float]] = []
+        for point in court_points or []:
+            if point is None:
                 continue
-            court_x, court_y = float(point[0]), float(point[1])
-            if court_x < 0.0 or court_x > self.COURT_WIDTH_CM or court_y < 0.0 or court_y > self.COURT_LENGTH_CM:
-                continue
-            self._player_heatmap_points.append((court_x, court_y, index))
-        overflow = len(self._player_heatmap_points) - self.HEATMAP_MAX_POINTS
-        if overflow > 0:
-            del self._player_heatmap_points[:overflow]
-
-    def _draw_player_heatmap(self, painter: QPainter, court: QRectF) -> None:
-        if not self._player_heatmap_points:
-            return
-
-        cols = self.HEATMAP_COLS
-        rows = self.HEATMAP_ROWS
-        heat = [[0 for _ in range(cols)] for _ in range(rows)]
-        player_heat = [
-            [[0 for _ in range(cols)] for _ in range(rows)]
-            for _ in range(2)
-        ]
-        for court_x, court_y, player_index in self._player_heatmap_points:
-            col = min(cols - 1, max(0, int((court_x / self.COURT_WIDTH_CM) * cols)))
-            row = min(rows - 1, max(0, int((court_y / self.COURT_LENGTH_CM) * rows)))
-            heat[row][col] += 1
-            if player_index < len(player_heat):
-                player_heat[player_index][row][col] += 1
-
-        max_count = max((max(row) for row in heat), default=0)
-        if max_count <= 0:
-            return
-
-        cell_w = court.width() / cols
-        cell_h = court.height() / rows
-        painter.setPen(Qt.PenStyle.NoPen)
-        for row in range(rows):
-            for col in range(cols):
-                count = heat[row][col]
-                if count <= 0:
+            try:
+                if len(point) < 2:
                     continue
-                top_count = player_heat[0][row][col]
-                bottom_count = player_heat[1][row][col]
-                intensity = min(1.0, count / max_count)
-                color = QColor("#38BDF8") if top_count >= bottom_count else QColor("#FACC15")
-                color.setAlpha(int(34 + 150 * intensity))
-                painter.setBrush(color)
-                x = court.left() + col * cell_w
-                y = court.top() + row * cell_h
-                painter.drawRect(QRectF(x, y, cell_w + 0.6, cell_h + 0.6))
+                court_x, court_y = float(point[0]), float(point[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if court_x != court_x or court_y != court_y:
+                continue
+            court_x = min(self.COURT_WIDTH_CM, max(0.0, court_x))
+            court_y = min(self.COURT_LENGTH_CM, max(0.0, court_y))
+            filtered.append((court_x, court_y))
+        return filtered
+
+    def _trim_heatmap_points(self) -> None:
+        overflow = len(self._top_player_points) - self.HEATMAP_MAX_POINTS
+        if overflow > 0:
+            del self._top_player_points[:overflow]
+        overflow = len(self._bottom_player_points) - self.HEATMAP_MAX_POINTS
+        if overflow > 0:
+            del self._bottom_player_points[:overflow]
+
+    def _should_refresh_heatmap(self) -> bool:
+        if self._top_heatmap_pixmap is None and self._top_player_points:
+            return True
+        if self._bottom_heatmap_pixmap is None and self._bottom_player_points:
+            return True
+        return self._heatmap_update_count >= self.HEATMAP_REFRESH_INTERVAL
+
+    def _draw_heatmap_layers(self, painter: QPainter, court: QRectF) -> None:
+        if self._show_top_heatmap and self._top_heatmap_pixmap is not None and not self._top_heatmap_pixmap.isNull():
+            painter.drawPixmap(court.toRect(), self._top_heatmap_pixmap)
+        if self._show_bottom_heatmap and self._bottom_heatmap_pixmap is not None and not self._bottom_heatmap_pixmap.isNull():
+            painter.drawPixmap(court.toRect(), self._bottom_heatmap_pixmap)
 
     def _draw_ball_projection(self, painter: QPainter, court: QRectF) -> None:
         if self._ball_court_xy is None:
@@ -298,6 +600,9 @@ class BadmintonCourtWidget(QWidget):
 
     def _y(self, court: QRectF, mm: float) -> float:
         return court.top() + court.height() * (mm / self.COURT_LENGTH_MM)
+
+
+BadmintonCourtWidget = CourtHeatmapWidget
 
 
 class MainWindow(QMainWindow):
@@ -550,6 +855,7 @@ class MainWindow(QMainWindow):
         self.tabs.setTabShape(QTabWidget.TabShape.Rounded)
 
         self._build_overview_tab()
+        self._build_stats_tab()
         self._build_pose_tab()
         self._build_settings_tab()
         self._build_log_tab()
@@ -590,6 +896,37 @@ class MainWindow(QMainWindow):
         overview_layout.addWidget(self.table_actions)
         self.tabs.addTab(tab_overview, "概览")
 
+    def _build_stats_tab(self) -> None:
+        tab_stats = QWidget()
+        stats_layout = QVBoxLayout(tab_stats)
+        stats_layout.setContentsMargins(12, 12, 12, 12)
+        stats_layout.setSpacing(12)
+
+        section_header = QHBoxLayout()
+        section_title = QLabel("击球类型统计")
+        section_title.setObjectName("sectionTitle")
+        section_note = QLabel("按 BST 输出累计")
+        section_note.setObjectName("sectionNote")
+        section_header.addWidget(section_title)
+        section_header.addStretch(1)
+        section_header.addWidget(section_note)
+
+        stats_frame = QFrame()
+        stats_frame.setObjectName("emptyStateCard")
+        stats_frame_layout = QVBoxLayout(stats_frame)
+        stats_frame_layout.setContentsMargins(18, 18, 18, 18)
+        stats_frame_layout.setSpacing(12)
+
+        self.lbl_stroke_total = QLabel("总击球 0 次")
+        self.lbl_stroke_total.setObjectName("sectionNote")
+        self.stroke_pie_chart = StrokePieChartWidget()
+
+        stats_frame_layout.addWidget(self.lbl_stroke_total, alignment=Qt.AlignmentFlag.AlignRight)
+        stats_frame_layout.addWidget(self.stroke_pie_chart, stretch=1)
+        stats_layout.addLayout(section_header)
+        stats_layout.addWidget(stats_frame, stretch=1)
+        self.tabs.addTab(tab_stats, "统计")
+
     def _build_pose_tab(self) -> None:
         tab_pose = QWidget()
         pose_layout = QVBoxLayout(tab_pose)
@@ -603,7 +940,7 @@ class MainWindow(QMainWindow):
 
         pose_title = QLabel("姿态与轨迹")
         pose_title.setObjectName("sectionTitle")
-        self.court_widget = BadmintonCourtWidget()
+        self.court_widget = CourtHeatmapWidget()
 
         pose_frame_layout.addWidget(pose_title, alignment=Qt.AlignmentFlag.AlignCenter)
         pose_frame_layout.addWidget(self.court_widget, stretch=1)
@@ -874,12 +1211,19 @@ class MainWindow(QMainWindow):
 
         self.table_actions.setItem(row, 3, QTableWidgetItem(detail))
         self.table_actions.scrollToTop()
+        self.stroke_pie_chart.increment(label)
+        self._refresh_stroke_total()
 
     def reset_analysis(self) -> None:
         self.progress_bar.setValue(0)
         self.table_actions.setRowCount(0)
+        self.stroke_pie_chart.clear_counts()
+        self._refresh_stroke_total()
         self.court_widget.clear_player_heatmap()
         self.lbl_realtime_fps.setText("0.0 FPS")
         self.lbl_avg_conf.setText("0.0%")
         self.lbl_valid_pose.setText("0.0 FPS")
         self.lbl_valid_track.setText("0")
+
+    def _refresh_stroke_total(self) -> None:
+        self.lbl_stroke_total.setText(f"总击球 {self.stroke_pie_chart.total_count()} 次")
