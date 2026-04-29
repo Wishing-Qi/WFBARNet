@@ -21,6 +21,8 @@ from PyQt6.QtWidgets import QApplication, QFileDialog
 from apps.pyqt6.utils.style import apply_theme, discover_themes
 from apps.pyqt6.utils.theme_transition import start_theme_ripple_transition
 from apps.pyqt6.views.main_window_refined import MainWindow
+from src.models.bst_runtime import build_bst_model
+from src.models.bst_stroke_runtime import BSTStrokeRecognizer
 from src.models.pose_branch import PoseBranch
 from src.models.track_branch import TrackBranch
 from src.postprocess.pose import CourtPoseTargetTracker
@@ -316,6 +318,8 @@ class TrackNetPlaybackWorker(QThread):
         display_fps_limit: float = DISPLAY_FPS_LIMIT,
         court_service: Any | None = None,
         debug_csv_path: str | None = None,
+        bst_model: Any | None = None,
+        bst_device: str = "cpu",
     ) -> None:
         super().__init__()
         self._video_path = video_path
@@ -328,6 +332,8 @@ class TrackNetPlaybackWorker(QThread):
         self._display_fps_limit = max(1.0, float(display_fps_limit))
         self._court_service = court_service
         self._debug_csv_path = debug_csv_path
+        self._bst_model = bst_model
+        self._bst_device = bst_device
         self._stop_requested = False
 
     def request_stop(self) -> None:
@@ -339,7 +345,20 @@ class TrackNetPlaybackWorker(QThread):
             names.append("TrackNet")
         if self._pose_enabled:
             names.append("YOLO26s-Pose")
+        if self._bst_model is not None and self._track_enabled and self._pose_enabled:
+            names.append("BST")
         return " + ".join(names) if names else "Preview"
+
+    def _create_bst_recognizer(self, width: int, height: int, fps: float) -> BSTStrokeRecognizer | None:
+        if self._bst_model is None or not self._track_enabled or not self._pose_enabled:
+            return None
+        return BSTStrokeRecognizer(
+            self._bst_model,
+            self._bst_device,
+            max(1, int(width)),
+            max(1, int(height)),
+            fps=fps,
+        )
 
     def _read_frame(
         self,
@@ -414,6 +433,10 @@ class TrackNetPlaybackWorker(QThread):
             motion_prediction_scale=0.55,
         )
         trail_renderer = TrackTrailRenderer(fps=fps, history_seconds=0.5)
+        frame_height, frame_width = current_frame.shape[:2]
+        bst_recognizer = self._create_bst_recognizer(frame_width, frame_height, fps)
+        pending_bst_predictions: list[dict[str, Any]] = []
+        pending_bst_errors: list[str] = []
         display_interval_ms = 1000.0 / self._display_fps_limit
         display_every_frame = fps <= self._display_fps_limit
         next_display_ms = float(base_ms)
@@ -487,13 +510,31 @@ class TrackNetPlaybackWorker(QThread):
                     infer_fps = 1.0 / infer_elapsed
                     ema_infer_fps = infer_fps if ema_infer_fps == 0.0 else (0.85 * ema_infer_fps + 0.15 * infer_fps)
 
+                    frame_result = FrameResult(frame_id=frame_id, pose=last_pose, track=track)
                     should_emit = display_every_frame or final_pass or current_ms >= next_display_ms
                     image = None
                     if should_emit:
-                        frame_result = FrameResult(frame_id=frame_id, pose=last_pose, track=track)
                         vis_frame = current_frame.copy()
                         trail_renderer.draw_on(vis_frame, frame_result, timestamp_ms=current_ms)
+                        hit_event = trail_renderer.last_hit_event()
                         image = frame_to_qimage(vis_frame)
+                    else:
+                        trail_renderer.update_hit_detection(frame_result, timestamp_ms=current_ms)
+                        hit_event = trail_renderer.last_hit_event()
+
+                    if bst_recognizer is not None:
+                        try:
+                            bst_prediction = bst_recognizer.update(
+                                frame_result,
+                                hit_event=hit_event,
+                                court_prediction=court_prediction,
+                            )
+                        except Exception as exc:
+                            pending_bst_errors.append(str(exc))
+                            bst_recognizer = None
+                        else:
+                            if bst_prediction is not None:
+                                pending_bst_predictions.append(bst_prediction)
 
                     target_ms = max(0, current_ms - base_ms)
                     if not self._sleep_until(target_ms, clock):
@@ -529,7 +570,11 @@ class TrackNetPlaybackWorker(QThread):
                             "ball_projection": None,
                             "player_projections": player_projections,
                             "track_debug": track_debug,
+                            "bst_predictions": list(pending_bst_predictions),
+                            "bst_errors": list(pending_bst_errors),
                         }
+                        pending_bst_predictions.clear()
+                        pending_bst_errors.clear()
                         self.frameReady.emit(payload)
                         if not display_every_frame:
                             while next_display_ms <= current_ms:
@@ -607,6 +652,8 @@ class CameraInferenceWorker(QThread):
         display_fps_limit: float = DISPLAY_FPS_LIMIT,
         court_service: Any | None = None,
         debug_csv_path: str | None = None,
+        bst_model: Any | None = None,
+        bst_device: str = "cpu",
     ) -> None:
         super().__init__()
         self._camera_index = camera_index
@@ -618,6 +665,8 @@ class CameraInferenceWorker(QThread):
         self._display_fps_limit = max(1.0, float(display_fps_limit))
         self._court_service = court_service
         self._debug_csv_path = debug_csv_path
+        self._bst_model = bst_model
+        self._bst_device = bst_device
         self._stop_requested = False
 
     def request_stop(self) -> None:
@@ -629,7 +678,20 @@ class CameraInferenceWorker(QThread):
             names.append("TrackNet")
         if self._pose_enabled:
             names.append("YOLO26s-Pose")
+        if self._bst_model is not None and self._track_enabled and self._pose_enabled:
+            names.append("BST")
         return " + ".join(names) if names else "Preview"
+
+    def _create_bst_recognizer(self, width: int, height: int, fps: float) -> BSTStrokeRecognizer | None:
+        if self._bst_model is None or not self._track_enabled or not self._pose_enabled:
+            return None
+        return BSTStrokeRecognizer(
+            self._bst_model,
+            self._bst_device,
+            max(1, int(width)),
+            max(1, int(height)),
+            fps=fps,
+        )
 
     def run(self) -> None:
         cap, backend_name = open_camera_capture(self._camera_index, quiet=True)
@@ -671,6 +733,10 @@ class CameraInferenceWorker(QThread):
             motion_prediction_scale=0.55,
         )
         trail_renderer = TrackTrailRenderer(fps=fps, history_seconds=0.5)
+        frame_height, frame_width = first_frame.shape[:2]
+        bst_recognizer = self._create_bst_recognizer(frame_width, frame_height, fps)
+        pending_bst_predictions: list[dict[str, Any]] = []
+        pending_bst_errors: list[str] = []
         display_interval_ms = 1000.0 / self._display_fps_limit
         next_display_ms = 0.0
         clock = QElapsedTimer()
@@ -751,12 +817,31 @@ class CameraInferenceWorker(QThread):
                     player_projections = project_poses_to_court(last_pose, court_prediction)
                     write_track_debug_row(debug_writer, track_debug)
                     track_filter.debug_records.clear()
+                    frame_result = FrameResult(frame_id=current_frame_id, pose=last_pose, track=track)
                     if position_ms >= next_display_ms:
-                        frame_result = FrameResult(frame_id=current_frame_id, pose=last_pose, track=track)
                         vis_frame = current_frame.copy()
                         trail_renderer.draw_on(vis_frame, frame_result, timestamp_ms=position_ms)
+                        hit_event = trail_renderer.last_hit_event()
                         image = frame_to_qimage(vis_frame)
+                    else:
+                        trail_renderer.update_hit_detection(frame_result, timestamp_ms=position_ms)
+                        hit_event = trail_renderer.last_hit_event()
 
+                    if bst_recognizer is not None:
+                        try:
+                            bst_prediction = bst_recognizer.update(
+                                frame_result,
+                                hit_event=hit_event,
+                                court_prediction=court_prediction,
+                            )
+                        except Exception as exc:
+                            pending_bst_errors.append(str(exc))
+                            bst_recognizer = None
+                        else:
+                            if bst_prediction is not None:
+                                pending_bst_predictions.append(bst_prediction)
+
+                    if position_ms >= next_display_ms:
                         payload = {
                             "image": image,
                             "frame_id": current_frame_id,
@@ -778,7 +863,11 @@ class CameraInferenceWorker(QThread):
                             "ball_projection": None,
                             "player_projections": player_projections,
                             "track_debug": track_debug,
+                            "bst_predictions": list(pending_bst_predictions),
+                            "bst_errors": list(pending_bst_errors),
                         }
+                        pending_bst_predictions.clear()
+                        pending_bst_errors.clear()
                         self.frameReady.emit(payload)
                         while next_display_ms <= position_ms:
                             next_display_ms += display_interval_ms
@@ -815,6 +904,7 @@ class MainController:
         self._settings = QSettings("WFBARNet", "PyQt6Runtime")
         self._default_pose_model_path = str(self._project_root / "assets" / "weights" / "pose" / "yolo26s-pose.pt")
         self._default_track_model_path = str(self._project_root / "assets" / "weights" / "track" / "model_best.pt")
+        self._default_bst_model_path = self._project_root / "assets" / "weights" / "bst" / "bst_CG_AP_JnB_bone_merged_10.pt"
         self._pose_model_path = self._load_model_path("pose_model_path", self._default_pose_model_path)
         self._track_model_path = self._load_model_path("track_model_path", self._default_track_model_path)
         self._pose_model_enabled = self._load_bool_setting("pose_model_enabled", True)
@@ -842,6 +932,8 @@ class MainController:
         self.view.set_debug_csv_enabled(self._debug_csv_enabled)
         self._track_branch = self._build_track_branch()
         self._pose_branch = self._build_pose_branch()
+        self._bst_device = "cuda" if torch.cuda.is_available() else "cpu"
+        self._bst_model = self._build_bst_model()
 
         self._bind_court_service()
         self._bind_events()
@@ -964,6 +1056,23 @@ class MainController:
         branch = self._create_pose_branch(self._pose_model_path)
         self.view.append_log(f"[YOLO26s-Pose] 模型已加载: {branch.device} | {Path(self._pose_model_path).name}")
         return branch
+
+    def _build_bst_model(self) -> Any | None:
+        if not self._default_bst_model_path.is_file():
+            self.view.append_log(f"[BST] weight not found: {self._default_bst_model_path}")
+            return None
+        try:
+            model = build_bst_model(self._default_bst_model_path)
+            model.to(self._bst_device)
+            model.eval()
+        except Exception as exc:
+            self.view.append_log(f"[BST] failed to load stroke model: {exc}")
+            return None
+        self.view.append_log(
+            f"[BST] stroke model ready | {self._bst_device} | "
+            f"seq_len {getattr(model, 'bst_seq_len', '?')} | classes {getattr(model, 'bst_n_classes', '?')}"
+        )
+        return model
 
     def _create_pose_branch(self, model_weight: str) -> PoseBranch:
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -1351,6 +1460,8 @@ class MainController:
             pose_enabled=self._pose_model_enabled,
             court_service=self._court_service,
             debug_csv_path=debug_csv_path,
+            bst_model=self._bst_model,
+            bst_device=self._bst_device,
         )
         self._camera_worker.frameReady.connect(self._on_camera_frame_ready)
         self._camera_worker.inferFinished.connect(self._on_camera_finished)
@@ -1384,6 +1495,8 @@ class MainController:
             pose_enabled=self._pose_model_enabled,
             court_service=self._court_service,
             debug_csv_path=debug_csv_path,
+            bst_model=self._bst_model,
+            bst_device=self._bst_device,
         )
         self._playback_worker.frameReady.connect(self._on_frame_ready)
         self._playback_worker.playbackFinished.connect(self._on_playback_finished)
@@ -1406,6 +1519,7 @@ class MainController:
             )
             self._update_display_fps()
         self._log_track_debug_event(payload.get("track_debug"))
+        self._append_bst_predictions(payload)
 
         progress = max(0, min(int(float(payload.get("progress", 0.0)) * 100), 100))
         self.view.update_progress(progress)
@@ -1443,6 +1557,7 @@ class MainController:
             self.view.court_widget.set_player_projections(payload.get("player_projections"))
             self._update_display_fps()
         self._log_track_debug_event(payload.get("track_debug"))
+        self._append_bst_predictions(payload)
         if not self._should_update_metrics_text():
             return
 
@@ -1465,6 +1580,51 @@ class MainController:
         self.view.status_label.setText(
             f"系统状态：摄像头 TrackNet + YOLO26s-Pose 推理中 | 人数 {person_count} | Score {current_score:.2f}{court_text}"
         )
+
+    def _append_bst_predictions(self, payload: dict[str, Any]) -> None:
+        errors = payload.get("bst_errors", [])
+        if isinstance(errors, list):
+            for error in errors:
+                self.view.append_log(f"[BST] stroke inference disabled after error: {error}")
+
+        predictions = payload.get("bst_predictions", [])
+        if not isinstance(predictions, list):
+            return
+        for prediction in predictions:
+            if not isinstance(prediction, dict):
+                continue
+            time_range = self._format_time_ms(int(prediction.get("timestamp_ms", 0)))
+            label = str(prediction.get("pred_display_name", prediction.get("pred_name", "unknown")))
+            confidence = float(prediction.get("confidence", 0.0))
+            detail = self._format_bst_prediction_detail(prediction)
+            self.view.add_action_row(time_range, label, confidence, detail)
+            self.view.append_log(f"[BST] hit {time_range} -> {label} ({confidence * 100:.1f}%)")
+
+    def _format_bst_prediction_detail(self, prediction: dict[str, Any]) -> str:
+        top5 = prediction.get("top5_display", prediction.get("top5", []))
+        top_items: list[str] = []
+        if isinstance(top5, list):
+            for item in top5[:3]:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("display_name", item.get("class_name", item.get("class_id", ""))))
+                prob = float(item.get("probability", 0.0))
+                top_items.append(f"{name} {prob * 100:.1f}%")
+        h_text = "court H" if prediction.get("used_homography") else "fallback pos"
+        top_text = ", ".join(top_items) if top_items else "n/a"
+        return (
+            f"frame {int(prediction.get('event_frame_id', -1))} | "
+            f"clip {int(prediction.get('video_len', 0))}/{int(prediction.get('seq_len', 0))} | "
+            f"{h_text} | failed {int(prediction.get('failed_frames', 0))} | top3 {top_text}"
+        )
+
+    def _format_time_ms(self, timestamp_ms: int) -> str:
+        total_seconds = max(0.0, float(timestamp_ms) / 1000.0)
+        minutes = int(total_seconds // 60)
+        seconds = total_seconds - minutes * 60
+        if minutes > 0:
+            return f"{minutes:d}:{seconds:05.2f}"
+        return f"{seconds:.2f}s"
 
     def _log_track_debug_event(self, debug: object) -> None:
         if not isinstance(debug, dict):

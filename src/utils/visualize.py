@@ -47,9 +47,10 @@ class TrackTrailRenderer:
     hit_speed_change_min_turn_deg: float = 45.0
     hit_min_speed_change_ratio: float = 1.7
     hit_cooldown_seconds: float = 0.18
-    _points: deque[tuple[float, float, float, float]] = field(default_factory=deque)
+    _points: deque[tuple[float, int, float, float, float]] = field(default_factory=deque)
     _hit_markers: deque[tuple[float, float, float]] = field(default_factory=deque)
     _last_hit_time_s: float = -999.0
+    _last_hit_event: dict[str, object] | None = None
 
     def draw(
         self,
@@ -69,19 +70,38 @@ class TrackTrailRenderer:
         timestamp_ms: int | None = None,
     ) -> np.ndarray:
         _draw_pose(canvas, result)
-
-        timestamp_s = self._timestamp_seconds(result.frame_id, timestamp_ms)
-        if result.track.visible:
-            x, y = map(float, result.track.ball_xy)
-            self._points.append((timestamp_s, x, y, float(result.track.score)))
-            if self._is_hit_event(timestamp_s):
-                _, hit_x, hit_y, _ = self._points[-2]
-                self._hit_markers.append((timestamp_s, hit_x, hit_y))
-        self._prune(timestamp_s)
+        timestamp_s = self.update_hit_detection(result, timestamp_ms=timestamp_ms)
         self._draw_trail(canvas, timestamp_s)
         self._draw_current(canvas, result.track)
         self._draw_hit_markers(canvas)
         return canvas
+
+    def update_hit_detection(
+        self,
+        result: FrameResult,
+        *,
+        timestamp_ms: int | None = None,
+    ) -> float:
+        timestamp_s = self._timestamp_seconds(result.frame_id, timestamp_ms)
+        self._last_hit_event = None
+        if result.track.visible:
+            x, y = map(float, result.track.ball_xy)
+            self._points.append((timestamp_s, int(result.frame_id), x, y, float(result.track.score)))
+            if self._is_hit_event(timestamp_s):
+                hit_time_s, hit_frame_id, hit_x, hit_y, _ = self._points[-2]
+                self._hit_markers.append((timestamp_s, hit_x, hit_y))
+                self._last_hit_event = {
+                    "frame_id": int(hit_frame_id),
+                    "timestamp_ms": int(round(hit_time_s * 1000.0)),
+                    "ball_xy": [float(hit_x), float(hit_y)],
+                }
+        self._prune(timestamp_s)
+        return timestamp_s
+
+    def last_hit_event(self) -> dict[str, object] | None:
+        if self._last_hit_event is None:
+            return None
+        return dict(self._last_hit_event)
 
     def _timestamp_seconds(self, frame_id: int, timestamp_ms: int | None) -> float:
         if timestamp_ms is not None:
@@ -98,7 +118,7 @@ class TrackTrailRenderer:
             self._hit_markers.popleft()
 
     def _draw_trail(self, canvas: np.ndarray, timestamp_s: float) -> None:
-        for point_time, x, y, _ in self._points:
+        for point_time, _frame_id, x, y, _ in self._points:
             age = max(0.0, timestamp_s - point_time)
             fade = max(0.15, 1.0 - age / max(self.history_seconds, 1e-6))
             radius = max(2, int(round(self.trail_radius + fade * 2)))
@@ -134,10 +154,10 @@ class TrackTrailRenderer:
         if dt_before <= 1e-6 or dt_after <= 1e-6:
             return False
 
-        vx_before = mid[1] - prev[1]
-        vy_before = mid[2] - prev[2]
-        vx_after = current[1] - mid[1]
-        vy_after = current[2] - mid[2]
+        vx_before = mid[2] - prev[2]
+        vy_before = mid[3] - prev[3]
+        vx_after = current[2] - mid[2]
+        vy_after = current[3] - mid[3]
         dist_before = hypot(vx_before, vy_before)
         dist_after = hypot(vx_after, vy_after)
         if min(dist_before, dist_after) < 3.0:
