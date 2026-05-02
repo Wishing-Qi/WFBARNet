@@ -27,6 +27,8 @@ class BallTrackFilterConfig:
     impact_relock_confirm_frames: int = 2
     impact_relock_min_missed_frames: int = 1
     impact_relock_min_angle_deg: float = 100.0
+    impact_relock_max_prediction_error_px: float = 260.0
+    impact_relock_max_prediction_error_per_missed_px: float = 28.0
     close_gate_confidence: float = 0.50
     close_gate_px: float = 72.0
     court_filter_enabled: bool = True
@@ -67,6 +69,7 @@ class BallTrackFilterConfig:
     parabola_score_bonus_px: float = 20.0
     parabola_score_decay: float = 0.58
     parabola_fill_on_outlier: bool = True
+    parabola_fill_max_outlier_distance_px: float = 180.0
     relock_distance_px: float = 220.0
     relock_max_speed_px_per_sec: float = 9000.0
     relock_confirm_frames: int = 3
@@ -81,6 +84,8 @@ class BallTrackFilterConfig:
     top_exit_history_frames: int = 4
     top_exit_suppression_frames: int = 6
     top_exit_reversal_min_delta_px: float = 8.0
+    top_edge_hallucination_min_gap_px: float = 120.0
+    top_edge_hallucination_min_gap_ratio: float = 0.10
     static_hotspot_enabled: bool = True
     static_hotspot_radius_px: float = 18.0
     static_hotspot_min_frames: int = 4
@@ -243,6 +248,9 @@ class BallTrackFilter:
             self._enter_top_exit()
             self._mark_decision("top_exit_enter", "measurement_reverses_after_top_exit", force=True)
             result = self._invisible(track)
+        elif self._measurement_is_top_edge_hallucination(measurement, step_dt, frame_size):
+            self._mark_decision("reject", "top_edge_hallucination")
+            result = self._reject(track, step_dt, allow_coast=True, frame_size=frame_size, court_filter=court_filter)
         elif (
             person_occlusion_active
             and self._point_inside_person_bbox(measurement, normalized_person_bboxes)
@@ -273,10 +281,7 @@ class BallTrackFilter:
                 self._mark_decision("relock_accept", reason, force=True)
                 result = self._accept(track, measurement, step_dt, frame_size)
             else:
-                allow_parabola_fill = (
-                    self.config.parabola_fill_on_outlier
-                    and self._parabola_prediction(self._frame_index) is not None
-                )
+                allow_parabola_fill = self._should_fill_outlier_with_parabola(measurement)
                 self._mark_decision("reject", "candidate_failed_motion_gate")
                 result = self._reject(
                     track,
@@ -642,6 +647,15 @@ class BallTrackFilter:
         )
         allowed_distance = min(max(allowed_distance, self.config.parabola_gate_px), self.config.parabola_max_gate_px)
         return _distance(measurement, prediction.point) <= allowed_distance
+
+    def _should_fill_outlier_with_parabola(self, measurement: Point) -> bool:
+        if not self.config.parabola_fill_on_outlier:
+            return False
+        prediction = self._parabola_prediction(self._frame_index)
+        if prediction is None:
+            return False
+        max_distance = max(0.0, float(self.config.parabola_fill_max_outlier_distance_px))
+        return _distance(measurement, prediction.point) <= max_distance
 
     def _passes_inertia(self, measurement: Point, score: float, dt: float) -> bool:
         assert self._last_point is not None
@@ -1146,6 +1160,14 @@ class BallTrackFilter:
         if displacement_length <= 1e-6:
             return False
 
+        predicted = self._predict(dt)
+        max_prediction_error = (
+            float(self.config.impact_relock_max_prediction_error_px)
+            + max(0, self._missed_frames - 1) * float(self.config.impact_relock_max_prediction_error_per_missed_px)
+        )
+        if _distance(measurement, predicted) > max_prediction_error:
+            return False
+
         direction_cos = _dot(displacement, self._velocity) / max(displacement_length * speed, 1e-6)
         angle_threshold_cos = cos(radians(self.config.impact_relock_min_angle_deg))
         return direction_cos <= angle_threshold_cos
@@ -1221,6 +1243,32 @@ class BallTrackFilter:
             return False
 
         return measurement[1] > self._last_point[1] + self.config.top_exit_reversal_min_delta_px
+
+    def _measurement_is_top_edge_hallucination(
+        self,
+        measurement: Point,
+        dt: float,
+        frame_size: FrameSize | None,
+    ) -> bool:
+        if not self.config.top_exit_enabled or frame_size is None:
+            return False
+        if not self._locked or self._last_point is None:
+            return False
+        if self._top_exit_is_likely(dt, frame_size):
+            return False
+
+        _, height = frame_size
+        top_band = self._top_exit_band(frame_size)
+        if measurement[1] > top_band:
+            return False
+
+        predicted = self._predict(dt)
+        nearest_track_y = min(self._last_point[1], predicted[1])
+        required_gap = max(
+            float(self.config.top_edge_hallucination_min_gap_px),
+            float(height) * max(0.0, float(self.config.top_edge_hallucination_min_gap_ratio)),
+        )
+        return nearest_track_y - measurement[1] >= required_gap
 
     def _top_exit_band(self, frame_size: FrameSize | None) -> float:
         if frame_size is None:

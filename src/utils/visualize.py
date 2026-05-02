@@ -63,7 +63,8 @@ class TrackTrailRenderer:
     hit_top_exit_band_ratio: float = 0.08
     hit_pose_assist_score: float = 0.60
     hit_pose_assist_strong_score: float = 0.78
-    hit_pose_assist_max_ball_wrist_px: float = 96.0
+    hit_pose_assist_max_ball_wrist_px: float = 130.0
+    hit_pose_assist_override_score: float = 0.50
     hit_pose_assist_min_wrist_speed_px_per_sec: float = 220.0
     hit_pose_assist_relaxed_turn_deg: float = 55.0
     hit_pose_assist_relaxed_min_speed_px_per_sec: float = 360.0
@@ -220,6 +221,7 @@ class TrackTrailRenderer:
         speed_after = dist_after / dt_after
         pose_score = max(prev[7], mid[7], current[7])
         has_pose_assist = pose_score >= self.hit_pose_assist_score
+        has_pose_override = pose_score >= self.hit_pose_assist_override_score
         min_speed = (
             self.hit_pose_assist_relaxed_min_speed_px_per_sec
             if has_pose_assist
@@ -237,9 +239,9 @@ class TrackTrailRenderer:
             speed_after=speed_after,
             dist_before=dist_before,
             dist_after=dist_after,
-        ) and pose_score < self.hit_pose_assist_strong_score:
+        ) and not has_pose_override:
             return False
-        if self._looks_like_person_occlusion(prev, mid, current) and pose_score < self.hit_pose_assist_strong_score:
+        if self._looks_like_person_occlusion(prev, mid, current) and not has_pose_override:
             return False
 
         turn_cos = (vx_before * vx_after + vy_before * vy_after) / (dist_before * dist_after)

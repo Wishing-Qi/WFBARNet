@@ -257,6 +257,17 @@ class BallTrackFilterTest(unittest.TestCase):
         self.assertAlmostEqual(corrected.ball_xy[1], 160.0, delta=4.0)
         self.assertLess(corrected.score, 0.95)
 
+    def test_far_outlier_does_not_draw_parabola_fill_point(self) -> None:
+        tracker = BallTrackFilter(fps=25.0)
+
+        for i in range(5):
+            tracker.update(_track(100.0 + 20.0 * i, 200.0 - 18.0 * i + 2.0 * i * i, 0.92))
+
+        corrected = tracker.update(_track(260.0, 520.0, 0.95))
+
+        self.assertFalse(corrected.visible)
+        self.assertEqual(corrected.ball_xy, [-1.0, -1.0])
+
     def test_high_score_point_close_to_prediction_survives_inertia_break(self) -> None:
         tracker = BallTrackFilter(fps=60.0)
 
@@ -347,6 +358,22 @@ class BallTrackFilterTest(unittest.TestCase):
         self.assertTrue(second.visible)
         self.assertAlmostEqual(second.ball_xy[0], 114.0)
         self.assertAlmostEqual(second.ball_xy[1], 35.0)
+
+    def test_impact_relock_ignores_far_hallucinated_reversal(self) -> None:
+        tracker = BallTrackFilter(fps=60.0)
+        frame_shape = (1080, 1920, 3)
+
+        tracker.update(_track(600.0, 400.0, 0.92), frame_shape=frame_shape)
+        tracker.update(_track(630.0, 420.0, 0.9), frame_shape=frame_shape)
+        tracker.update(_track(660.0, 440.0, 0.9), frame_shape=frame_shape)
+
+        first = tracker.update(_track(760.0, 15.0, 0.72), frame_shape=frame_shape)
+        second = tracker.update(_track(763.0, 16.0, 0.74), frame_shape=frame_shape)
+        third = tracker.update(_track(766.0, 12.0, 0.76), frame_shape=frame_shape)
+
+        for output in (first, second, third):
+            if output.visible:
+                self.assertGreater(output.ball_xy[1], 100.0)
 
 
 if __name__ == "__main__":

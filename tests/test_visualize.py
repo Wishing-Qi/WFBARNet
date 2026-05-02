@@ -147,6 +147,28 @@ class TrackTrailRendererTest(unittest.TestCase):
 
         self.assertIsNotNone(renderer.last_hit_event())
 
+    def test_nearby_wrist_motion_allows_low_hit_shape(self) -> None:
+        renderer = TrackTrailRenderer(fps=25.0)
+        frame = np.zeros((220, 260, 3), dtype=np.uint8)
+
+        renderer.draw_on(
+            frame.copy(),
+            _frame_result(0, 90.0, 55.0, [_person_with_right_arm([60.0, 40.0, 210.0, 190.0], (80.0, 85.0), (105.0, 95.0), (125.0, 105.0))]),
+            timestamp_ms=0,
+        )
+        renderer.draw_on(
+            frame.copy(),
+            _frame_result(1, 90.0, 115.0, [_person_with_right_arm([60.0, 40.0, 210.0, 190.0], (90.0, 105.0), (125.0, 125.0), (168.0, 158.0))]),
+            timestamp_ms=40,
+        )
+        renderer.draw_on(
+            frame.copy(),
+            _frame_result(2, 96.0, 78.0, [_person_with_right_arm([60.0, 40.0, 210.0, 190.0], (92.0, 98.0), (128.0, 112.0), (158.0, 126.0))]),
+            timestamp_ms=80,
+        )
+
+        self.assertIsNotNone(renderer.last_hit_event())
+
     def test_pose_assist_recovers_relaxed_turn_hit(self) -> None:
         renderer = TrackTrailRenderer(fps=25.0)
         frame = np.zeros((160, 180, 3), dtype=np.uint8)
