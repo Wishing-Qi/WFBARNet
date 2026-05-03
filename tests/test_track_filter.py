@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from src.postprocess.track_filter import BallTrackFilter
+from src.postprocess.track_filter import BallTrackFilter, _TrajectoryPoint
 from src.utils.structures import TrackResult
 
 
@@ -45,6 +45,53 @@ class BallTrackFilterTest(unittest.TestCase):
         self.assertFalse(outputs[2].visible)
         self.assertTrue(outputs[3].visible)
         self.assertAlmostEqual(outputs[3].ball_xy[0], 214.0)
+
+    def test_high_score_bootstrap_locks_immediately(self) -> None:
+        tracker = BallTrackFilter(fps=25.0, debug_enabled=True)
+
+        output = tracker.update(_track(210.0, 440.0, 0.73), frame_shape=(720, 1280, 3))
+
+        self.assertTrue(output.visible)
+        self.assertEqual(tracker.debug_records[-1]["action"], "bootstrap_accept")
+        self.assertEqual(tracker.debug_records[-1]["reason"], "strong_confidence")
+
+    def test_high_score_bootstrap_near_top_edge_still_requires_confirmation(self) -> None:
+        tracker = BallTrackFilter(fps=25.0, debug_enabled=True)
+
+        output = tracker.update(_track(725.0, 18.0, 0.73), frame_shape=(1080, 1920, 3))
+
+        self.assertFalse(output.visible)
+        self.assertEqual(tracker.debug_records[-1]["action"], "bootstrap_wait")
+
+    def test_low_score_bootstrap_candidate_confirmation_keeps_waiting(self) -> None:
+        tracker = BallTrackFilter(fps=25.0, debug_enabled=True)
+
+        outputs = [
+            tracker.update(_track(210.0, 440.0, 0.45)),
+            tracker.update(_track(212.0, 439.0, 0.47)),
+            tracker.update(_track(214.0, 438.0, 0.50)),
+            tracker.update(_track(216.0, 437.0, 0.53)),
+        ]
+        recovered = tracker.update(_track(218.0, 436.0, 0.56))
+
+        self.assertTrue(all(not output.visible for output in outputs))
+        self.assertEqual(tracker.debug_records[-2]["action"], "bootstrap_wait")
+        self.assertTrue(recovered.visible)
+        self.assertEqual(tracker.debug_records[-1]["action"], "bootstrap_accept")
+        self.assertEqual(tracker.debug_records[-1]["reason"], "candidate_confirmed")
+
+    def test_static_bootstrap_candidate_cluster_keeps_waiting(self) -> None:
+        tracker = BallTrackFilter(fps=25.0, debug_enabled=True)
+
+        outputs = [
+            tracker.update(_track(1071.0, 219.0, 0.676)),
+            tracker.update(_track(1072.0, 210.0, 0.676)),
+            tracker.update(_track(1071.0, 202.0, 0.676)),
+        ]
+
+        self.assertTrue(all(not output.visible for output in outputs))
+        self.assertEqual(tracker.debug_records[-1]["action"], "bootstrap_wait")
+        self.assertEqual(tracker.debug_records[-1]["reason"], "static_bootstrap_candidate")
 
     def test_hides_outlier_detection_without_drifting_render_point(self) -> None:
         tracker = BallTrackFilter(fps=25.0)
@@ -192,7 +239,44 @@ class BallTrackFilterTest(unittest.TestCase):
         self.assertGreater(coasted.ball_xy[0], 180.0)
         self.assertLess(coasted.score, 0.05)
 
+    def test_stable_motion_can_coast_across_ten_frame_gap(self) -> None:
+        tracker = BallTrackFilter(fps=30.0, debug_enabled=True)
+
+        tracker.update(_track(100.0, 100.0, 0.92))
+        tracker.update(_track(220.0, 100.0, 0.9))
+        tracker.update(_track(340.0, 100.0, 0.9))
+
+        outputs = [tracker.update(_missing()) for _ in range(11)]
+
+        self.assertTrue(all(output.visible for output in outputs[:10]))
+        self.assertFalse(outputs[10].visible)
+        self.assertEqual(tracker.debug_records[3]["action"], "coast")
+        self.assertEqual(tracker.debug_records[12]["action"], "coast")
+        self.assertEqual(tracker.debug_records[13]["action"], "reject")
+        self.assertTrue(tracker.debug_records[13]["locked_after"])
+
     def test_person_occlusion_candidate_is_replaced_by_prediction(self) -> None:
+        tracker = BallTrackFilter(fps=25.0, debug_enabled=True)
+        frame_shape = (300, 500, 3)
+        person_bboxes = [(205.0, 80.0, 270.0, 170.0)]
+
+        tracker.update(_track(100.0, 100.0, 0.92), frame_shape=frame_shape)
+        tracker.update(_track(140.0, 100.0, 0.9), frame_shape=frame_shape)
+        tracker.update(_track(180.0, 100.0, 0.9), frame_shape=frame_shape)
+
+        corrected = tracker.update_candidates(
+            [_track(242.0, 136.0, 0.54)],
+            frame_shape=frame_shape,
+            person_bboxes=person_bboxes,
+        )
+
+        self.assertTrue(corrected.visible)
+        self.assertLess(corrected.ball_xy[0], 230.0)
+        self.assertAlmostEqual(corrected.ball_xy[1], 100.0, delta=4.0)
+        self.assertEqual(tracker.debug_records[-1]["action"], "coast")
+        self.assertEqual(tracker.debug_records[-1]["reason"], "person_occlusion_prediction")
+
+    def test_high_score_person_occlusion_candidate_stays_invisible(self) -> None:
         tracker = BallTrackFilter(fps=25.0, debug_enabled=True)
         frame_shape = (300, 500, 3)
         person_bboxes = [(205.0, 80.0, 270.0, 170.0)]
@@ -207,11 +291,10 @@ class BallTrackFilterTest(unittest.TestCase):
             person_bboxes=person_bboxes,
         )
 
-        self.assertTrue(corrected.visible)
-        self.assertLess(corrected.ball_xy[0], 230.0)
-        self.assertAlmostEqual(corrected.ball_xy[1], 100.0, delta=4.0)
-        self.assertEqual(tracker.debug_records[-1]["action"], "coast")
-        self.assertEqual(tracker.debug_records[-1]["reason"], "person_occlusion_prediction")
+        self.assertFalse(corrected.visible)
+        self.assertEqual(corrected.ball_xy, [-1.0, -1.0])
+        self.assertEqual(tracker.debug_records[-1]["action"], "reject")
+        self.assertEqual(tracker.debug_records[-1]["reason"], "person_occlusion_candidate_high_score")
 
     def test_person_occlusion_extends_missing_gap_coasting(self) -> None:
         tracker = BallTrackFilter(fps=25.0)
@@ -257,6 +340,21 @@ class BallTrackFilterTest(unittest.TestCase):
         self.assertAlmostEqual(corrected.ball_xy[1], 160.0, delta=4.0)
         self.assertLess(corrected.score, 0.95)
 
+    def test_parabola_fill_does_not_override_opposite_y_direction_candidate(self) -> None:
+        tracker = BallTrackFilter(fps=60.0, debug_enabled=True)
+
+        tracker.update(_track(1194.0, 370.0, 0.92))
+        tracker.update(_track(1193.4, 402.4, 0.9))
+        tracker.update(_track(1192.7, 430.9, 0.9))
+        tracker.update(_track(1193.2, 463.9, 0.9))
+
+        corrected = tracker.update(_track(1177.8, 411.3, 0.62))
+
+        self.assertFalse(corrected.visible)
+        self.assertEqual(corrected.ball_xy, [-1.0, -1.0])
+        self.assertEqual(tracker.debug_records[-1]["action"], "reject")
+        self.assertEqual(tracker.debug_records[-1]["reason"], "candidate_failed_motion_gate")
+
     def test_far_outlier_does_not_draw_parabola_fill_point(self) -> None:
         tracker = BallTrackFilter(fps=25.0)
 
@@ -280,6 +378,56 @@ class BallTrackFilterTest(unittest.TestCase):
         self.assertTrue(recovered.visible)
         self.assertAlmostEqual(recovered.ball_xy[0], 130.0)
         self.assertAlmostEqual(recovered.ball_xy[1], 210.0)
+
+    def test_high_score_candidate_inside_base_gate_bypasses_inertia(self) -> None:
+        tracker = BallTrackFilter(fps=60.0, debug_enabled=True)
+        tracker._locked = True
+        tracker._last_point = (1066.5353695543097, 206.3616917138888)
+        tracker._render_point = tracker._last_point
+        tracker._velocity = (-489.9986454449422, -820.8701774028916)
+        tracker._frame_index = 690
+        history = [
+            (679, 1075.8901448126026, 172.95252401747692),
+            (680, 1076.3744563644889, 177.04372903175627),
+            (681, 1076.4854369968448, 179.5780570269667),
+            (682, 1078.0051818629001, 183.8507139797569),
+            (683, 1078.2924906762812, 191.92828437532467),
+            (684, 1077.997617126353, 195.51949284985687),
+            (685, 1079.3519821563373, 205.51319421038346),
+            (686, 1080.1486459609794, 211.09571730744992),
+            (687, 1080.8598092794048, 222.78462830653143),
+            (688, 1081.2334592506968, 229.31283374924462),
+            (689, 1077.8636445286556, 228.01518214693175),
+            (690, 1066.5353695543097, 206.3616917138888),
+        ]
+        for frame_index, x, y in history:
+            tracker._history.append(_TrajectoryPoint(frame_index, (x, y)))
+        tracker._real_detections_since_relock = len(history)
+
+        recovered = tracker.update(
+            _track(1050.5739815295533, 150.9508812632277, 0.6683239936828613),
+            frame_shape=(1080, 1920, 3),
+        )
+
+        self.assertTrue(recovered.visible)
+        self.assertAlmostEqual(recovered.ball_xy[0], 1050.5739815295533)
+        self.assertAlmostEqual(recovered.ball_xy[1], 150.9508812632277)
+        self.assertEqual(tracker.debug_records[-1]["action"], "accept")
+
+    def test_close_prediction_motion_break_drops_conflicting_parabola(self) -> None:
+        tracker = BallTrackFilter(fps=25.0, debug_enabled=True)
+
+        for i in range(4):
+            tracker.update(_track(100.0, 300.0 - 30.0 * i, 0.92))
+
+        recovered = tracker.update(_track(100.0, 252.0, 0.66))
+        coasted = tracker.update(_missing())
+
+        self.assertTrue(recovered.visible)
+        self.assertEqual(tracker.debug_records[-2]["reason"], "passes_motion_gate")
+        self.assertTrue(coasted.visible)
+        self.assertGreater(coasted.ball_xy[1], 252.0)
+        self.assertEqual(tracker.debug_records[-1]["reason"], "velocity_prediction")
 
     def test_low_confidence_point_on_motion_path_can_keep_lock(self) -> None:
         tracker = BallTrackFilter(fps=25.0)
@@ -335,14 +483,29 @@ class BallTrackFilterTest(unittest.TestCase):
         tracker.update(_track(140.0, 100.0, 0.9))
         tracker.update(_track(180.0, 100.0, 0.9))
 
-        first = tracker.update(_track(700.0, 350.0, 0.72))
-        second = tracker.update(_track(706.0, 354.0, 0.74))
-        third = tracker.update(_track(712.0, 358.0, 0.76))
+        first = tracker.update(_track(700.0, 350.0, 0.62))
+        second = tracker.update(_track(706.0, 354.0, 0.64))
+        third = tracker.update(_track(712.0, 358.0, 0.66))
 
         self.assertFalse(first.visible)
         self.assertFalse(second.visible)
         self.assertTrue(third.visible)
         self.assertAlmostEqual(third.ball_xy[0], 712.0)
+
+    def test_high_score_candidate_relocks_after_second_consistent_failure(self) -> None:
+        tracker = BallTrackFilter(fps=25.0, debug_enabled=True)
+
+        tracker.update(_track(100.0, 100.0, 0.92))
+        tracker.update(_track(140.0, 100.0, 0.9))
+        tracker.update(_track(180.0, 100.0, 0.9))
+
+        first = tracker.update(_track(700.0, 350.0, 0.73))
+        second = tracker.update(_track(706.0, 354.0, 0.74))
+
+        self.assertFalse(first.visible)
+        self.assertTrue(second.visible)
+        self.assertAlmostEqual(second.ball_xy[0], 706.0)
+        self.assertEqual(tracker.debug_records[-1]["reason"], "high_score_fast_relock")
 
     def test_relocks_early_when_confirmed_candidate_reverses_direction(self) -> None:
         tracker = BallTrackFilter(fps=60.0)

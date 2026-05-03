@@ -22,7 +22,8 @@ class BallTrackFilterConfig:
     min_confidence: float = 0.35
     soft_min_confidence: float = 0.25
     relock_confidence: float = 0.50
-    strong_relock_confidence: float = 0.85
+    strong_relock_confidence: float = 0.72
+    bootstrap_confirm_min_confidence: float = 0.55
     impact_relock_confidence: float = 0.48
     impact_relock_confirm_frames: int = 2
     impact_relock_min_missed_frames: int = 1
@@ -31,6 +32,9 @@ class BallTrackFilterConfig:
     impact_relock_max_prediction_error_per_missed_px: float = 28.0
     close_gate_confidence: float = 0.50
     close_gate_px: float = 72.0
+    inertia_relax_confidence: float = 0.65
+    inertia_relax_max_confidence: float = 0.75
+    inertia_relax_prediction_gate_ratio: float = 1.0
     court_filter_enabled: bool = True
     court_filter_margin_cm: float = 140.0
     court_filter_margin_px: float = 96.0
@@ -44,7 +48,7 @@ class BallTrackFilterConfig:
     max_accel_px_per_sec2: float = 120000.0
     max_lateral_error_px: float = 82.0
     max_reverse_px: float = 36.0
-    max_coast_frames: int = 3
+    max_coast_frames: int = 10
     min_coast_speed_px_per_sec: float = 450.0
     coast_velocity_decay: float = 0.82
     coast_score_decay: float = 0.55
@@ -54,12 +58,14 @@ class BallTrackFilterConfig:
     person_occlusion_coast_frames: int = 7
     person_occlusion_min_speed_px_per_sec: float = 250.0
     person_occlusion_candidate_penalty: float = 140.0
+    person_occlusion_suppress_coast_candidate_score: float = 0.55
     frame_measurement_margin_px: float = 6.0
     out_of_frame_prediction_margin_px: float = 12.0
     parabola_enabled: bool = True
     parabola_min_points: int = 4
+    parabola_min_real_detections: int = 3
     parabola_history_frames: int = 12
-    parabola_max_gap_frames: int = 6
+    parabola_max_gap_frames: int = 8
     parabola_min_motion_px: float = 42.0
     parabola_max_fit_rmse_px: float = 48.0
     parabola_gate_px: float = 62.0
@@ -70,11 +76,13 @@ class BallTrackFilterConfig:
     parabola_score_decay: float = 0.58
     parabola_fill_on_outlier: bool = True
     parabola_fill_max_outlier_distance_px: float = 180.0
+    parabola_direction_conflict_min_delta_px: float = 6.0
     relock_distance_px: float = 220.0
     relock_max_speed_px_per_sec: float = 9000.0
     relock_confirm_frames: int = 3
+    high_score_fast_relock_confidence: float = 0.72
     relock_after_missed_frames: int = 2
-    max_missed_frames: int = 8
+    max_missed_frames: int = 12
     render_smoothing: float = 0.0
     top_exit_enabled: bool = True
     top_exit_margin_px: float = 24.0
@@ -95,6 +103,8 @@ class BallTrackFilterConfig:
     static_hotspot_tracking_speed_px_per_sec: float = 900.0
     static_hotspot_edge_band_ratio: float = 0.07
     static_hotspot_edge_max_motion_px: float = 32.0
+    bootstrap_static_max_x_span_px: float = 3.0
+    bootstrap_static_max_y_std_px: float = 15.0
 
 
 @dataclass(slots=True)
@@ -102,6 +112,9 @@ class _RelockCandidate:
     point: Point
     score: float
     count: int = 1
+    last_measurement: Point | None = None
+    direction_consistent: bool = True
+    measurements: tuple[Point, ...] = ()
 
 
 @dataclass(slots=True)
@@ -161,6 +174,7 @@ class BallTrackFilter:
         self._coast_frames = 0
         self._locked = False
         self._candidate: _RelockCandidate | None = None
+        self._real_detections_since_relock = 0
         self._history: deque[_TrajectoryPoint] = deque(maxlen=max(1, self.config.parabola_history_frames))
         self._static_hotspots: list[_StaticHotspot] = []
         self._frame_index = -1
@@ -184,6 +198,7 @@ class BallTrackFilter:
         self._coast_frames = 0
         self._locked = False
         self._candidate = None
+        self._real_detections_since_relock = 0
         self._history.clear()
         self._static_hotspots.clear()
         self._frame_index = -1
@@ -255,11 +270,17 @@ class BallTrackFilter:
             person_occlusion_active
             and self._point_inside_person_bbox(measurement, normalized_person_bboxes)
         ):
-            self._mark_decision("reject", "person_occlusion_candidate")
+            suppress_coast = (
+                float(track.score) > self.config.person_occlusion_suppress_coast_candidate_score
+            )
+            if suppress_coast:
+                self._mark_decision("reject", "person_occlusion_candidate_high_score", force=True)
+            else:
+                self._mark_decision("reject", "person_occlusion_candidate")
             result = self._reject(
                 track,
                 step_dt,
-                allow_coast=True,
+                allow_coast=not suppress_coast,
                 frame_size=frame_size,
                 court_filter=court_filter,
                 occlusion_active=True,
@@ -271,13 +292,20 @@ class BallTrackFilter:
             result = self._accept(track, measurement, step_dt, frame_size)
         elif self._passes_close_gate(measurement, float(track.score), step_dt, frame_size):
             self._mark_decision("accept", "close_prediction_motion_break")
+            self._invalidate_parabola_on_y_direction_conflict(measurement, step_dt)
             result = self._accept(track, measurement, step_dt, frame_size)
         else:
             relock = self._update_candidate(measurement, float(track.score), step_dt)
             impact_relock = self._should_impact_relock(measurement, step_dt)
-            if (relock and self._should_relock()) or impact_relock:
+            fast_relock = self._should_fast_relock()
+            if (relock and self._should_relock()) or impact_relock or fast_relock:
                 self._drop_lock()
-                reason = "impact_direction_change" if impact_relock else "stable_new_candidate"
+                if impact_relock:
+                    reason = "impact_direction_change"
+                elif fast_relock:
+                    reason = "high_score_fast_relock"
+                else:
+                    reason = "stable_new_candidate"
                 self._mark_decision("relock_accept", reason, force=True)
                 result = self._accept(track, measurement, step_dt, frame_size)
             else:
@@ -562,11 +590,22 @@ class BallTrackFilter:
         dt: float,
         frame_size: FrameSize | None,
     ) -> TrackResult:
-        if float(track.score) >= self.config.strong_relock_confidence:
+        if (
+            float(track.score) >= self.config.strong_relock_confidence
+            and not self._measurement_is_near_top_edge(measurement, frame_size)
+        ):
             self._mark_decision("bootstrap_accept", "strong_confidence")
             return self._accept(track, measurement, dt, frame_size)
 
-        if self._update_candidate(measurement, float(track.score), dt):
+        candidate_confirmed = self._update_candidate(measurement, float(track.score), dt)
+        if (
+            candidate_confirmed
+            and self._candidate is not None
+            and self._candidate.score >= self.config.bootstrap_confirm_min_confidence
+        ):
+            if self._candidate_is_static_bootstrap_cluster():
+                self._mark_decision("bootstrap_wait", "static_bootstrap_candidate", force=True)
+                return self._invisible(track)
             self._mark_decision("bootstrap_accept", "candidate_confirmed")
             return self._accept(track, measurement, dt, frame_size)
 
@@ -608,6 +647,10 @@ class BallTrackFilter:
         if not self._passes_parabola_gate(measurement, score):
             return False
 
+        if self._can_relax_inertia(score, distance_to_prediction):
+            self._invalidate_parabola_on_y_direction_conflict(measurement, dt)
+            return True
+
         return self._passes_inertia(measurement, score, dt)
 
     def _passes_close_gate(
@@ -633,6 +676,40 @@ class BallTrackFilter:
 
         return _distance(measurement, predicted) <= self.config.close_gate_px
 
+    def _invalidate_parabola_on_y_direction_conflict(self, measurement: Point, dt: float) -> None:
+        if self._last_point is None:
+            return
+
+        parabola_prediction = self._parabola_prediction(self._frame_index)
+        if parabola_prediction is None:
+            return
+
+        actual_delta_y = measurement[1] - self._last_point[1]
+        if not self._parabola_y_direction_conflicts(measurement, parabola_prediction):
+            return
+
+        elapsed = max(dt * max(self._missed_frames + 1, 1), 1e-6)
+        actual_velocity_y = actual_delta_y / elapsed
+        self._history.clear()
+        self._real_detections_since_relock = 0
+        self._velocity = (self._velocity[0], actual_velocity_y)
+
+    def _parabola_y_direction_conflicts(
+        self,
+        measurement: Point,
+        prediction: _ParabolaPrediction,
+    ) -> bool:
+        if self._last_point is None:
+            return False
+        min_delta = max(0.0, float(self.config.parabola_direction_conflict_min_delta_px))
+        parabola_delta_y = prediction.point[1] - self._last_point[1]
+        actual_delta_y = measurement[1] - self._last_point[1]
+        return (
+            abs(parabola_delta_y) >= min_delta
+            and abs(actual_delta_y) >= min_delta
+            and parabola_delta_y * actual_delta_y < 0.0
+        )
+
     def _passes_parabola_gate(self, measurement: Point, score: float) -> bool:
         prediction = self._parabola_prediction(self._frame_index)
         if prediction is None:
@@ -653,6 +730,8 @@ class BallTrackFilter:
             return False
         prediction = self._parabola_prediction(self._frame_index)
         if prediction is None:
+            return False
+        if self._parabola_y_direction_conflicts(measurement, prediction):
             return False
         max_distance = max(0.0, float(self.config.parabola_fill_max_outlier_distance_px))
         return _distance(measurement, prediction.point) <= max_distance
@@ -687,6 +766,19 @@ class BallTrackFilter:
         )
         return lateral_px <= allowed_lateral
 
+    def _measurement_is_near_top_edge(self, measurement: Point, frame_size: FrameSize | None) -> bool:
+        if frame_size is None:
+            return False
+        return measurement[1] <= self._top_exit_band(frame_size)
+
+    def _can_relax_inertia(self, score: float, distance_to_prediction: float) -> bool:
+        if score < self.config.inertia_relax_confidence:
+            return False
+        if score > self.config.inertia_relax_max_confidence:
+            return False
+        max_distance = self.config.base_gate_px * max(0.0, float(self.config.inertia_relax_prediction_gate_ratio))
+        return distance_to_prediction <= max_distance
+
     def _predict(self, dt: float) -> Point:
         assert self._last_point is not None
         parabola_prediction = self._parabola_prediction(self._frame_index)
@@ -720,6 +812,7 @@ class BallTrackFilter:
         dt: float,
         frame_size: FrameSize | None,
     ) -> TrackResult:
+        continues_real_detection = self._locked and self._missed_frames == 0 and self._coast_frames == 0
         if self._last_point is not None:
             raw_velocity = (
                 (measurement[0] - self._last_point[0]) / max(dt * max(self._missed_frames + 1, 1), 1e-6),
@@ -740,6 +833,10 @@ class BallTrackFilter:
         self._locked = True
         self._candidate = None
         self._record_history(measurement)
+        if continues_real_detection:
+            self._real_detections_since_relock += 1
+        else:
+            self._real_detections_since_relock = 1
         self._mark_decision("accept", "passes_motion_gate")
         return self._visible(track, self._render_point, frame_size)
 
@@ -1116,18 +1213,67 @@ class BallTrackFilter:
             self.config.relock_max_speed_px_per_sec * max(dt, 1e-6),
         )
         if self._candidate is None or _distance(measurement, self._candidate.point) > relock_distance:
-            self._candidate = _RelockCandidate(point=measurement, score=score)
+            self._candidate = _RelockCandidate(
+                point=measurement,
+                score=score,
+                last_measurement=measurement,
+                measurements=(measurement,),
+            )
         else:
+            if self._last_point is not None and self._candidate.last_measurement is not None:
+                previous_direction = (
+                    self._candidate.last_measurement[0] - self._last_point[0],
+                    self._candidate.last_measurement[1] - self._last_point[1],
+                )
+                current_direction = (
+                    measurement[0] - self._last_point[0],
+                    measurement[1] - self._last_point[1],
+                )
+                self._candidate.direction_consistent = (
+                    self._candidate.direction_consistent
+                    and _dot(previous_direction, current_direction) > 0.0
+                )
             self._candidate.point = (
                 0.35 * self._candidate.point[0] + 0.65 * measurement[0],
                 0.35 * self._candidate.point[1] + 0.65 * measurement[1],
             )
             self._candidate.score = max(self._candidate.score, score)
             self._candidate.count += 1
+            self._candidate.last_measurement = measurement
+            measurement_limit = max(1, int(self.config.relock_confirm_frames))
+            self._candidate.measurements = (*self._candidate.measurements, measurement)[-measurement_limit:]
 
         return (
             self._candidate.count >= self.config.relock_confirm_frames
             and self._candidate.score >= self.config.relock_confidence
+        )
+
+    def _candidate_is_static_bootstrap_cluster(self) -> bool:
+        if self._candidate is None:
+            return False
+
+        min_count = max(2, int(self.config.relock_confirm_frames))
+        measurements = self._candidate.measurements[-min_count:]
+        if len(measurements) < min_count:
+            return False
+
+        xs = [point[0] for point in measurements]
+        ys = [point[1] for point in measurements]
+        x_span = max(xs) - min(xs)
+        mean_y = sum(ys) / len(ys)
+        y_std = (sum((y - mean_y) ** 2 for y in ys) / len(ys)) ** 0.5
+        return (
+            x_span < max(0.0, float(self.config.bootstrap_static_max_x_span_px))
+            and y_std < max(0.0, float(self.config.bootstrap_static_max_y_std_px))
+        )
+
+    def _should_fast_relock(self) -> bool:
+        if self._candidate is None:
+            return False
+        return (
+            self._candidate.count >= 2
+            and self._candidate.score > self.config.high_score_fast_relock_confidence
+            and self._candidate.direction_consistent
         )
 
     def _should_relock(self) -> bool:
@@ -1180,6 +1326,7 @@ class BallTrackFilter:
         self._missed_frames = 0
         self._coast_frames = 0
         self._candidate = None
+        self._real_detections_since_relock = 0
         self._history.clear()
         self._top_exit_frames_remaining = 0
 
@@ -1295,15 +1442,18 @@ class BallTrackFilter:
             return None
 
         min_points = max(3, int(self.config.parabola_min_points))
-        if len(self._history) < min_points:
+        min_real_detections = max(1, int(self.config.parabola_min_real_detections))
+        usable_history_count = min(len(self._history), self._real_detections_since_relock)
+        if usable_history_count < max(min_points, min_real_detections):
             return None
 
-        last_frame = self._history[-1].frame_index
+        usable_history = list(self._history)[-usable_history_count:]
+        last_frame = usable_history[-1].frame_index
         gap_frames = target_frame - last_frame
         if gap_frames < 0 or gap_frames > self.config.parabola_max_gap_frames:
             return None
 
-        history = list(self._history)[-max(min_points, int(self.config.parabola_history_frames)) :]
+        history = usable_history[-max(min_points, int(self.config.parabola_history_frames)) :]
         if history[-1].frame_index - history[0].frame_index < min_points - 1:
             return None
 

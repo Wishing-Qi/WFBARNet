@@ -45,12 +45,21 @@ class _ArmMotion:
     extension: float
 
 
+@dataclass(frozen=True)
+class _HitDetection:
+    timestamp_s: float
+    frame_id: int
+    x: float
+    y: float
+
+
 @dataclass
 class TrackTrailRenderer:
     fps: float = 25.0
     history_seconds: float = 0.5
     current_radius: int = 8
     trail_radius: int = 4
+    trail_break_threshold_px: float = 80.0
     hit_marker_seconds: float = 2.0
     hit_marker_radius: int = 7
     hit_min_speed_px_per_sec: float = 500.0
@@ -72,6 +81,13 @@ class TrackTrailRenderer:
     hit_floor_bounce_min_vertical_px: float = 10.0
     hit_floor_bounce_min_vertical_ratio: float = 0.45
     hit_floor_bounce_max_rebound_speed_ratio: float = 1.35
+    hit_min_track_score: float = 0.25
+    hit_abrupt_min_score: float = 0.50
+    hit_abrupt_min_jump_px: float = 120.0
+    hit_abrupt_min_jump_ratio: float = 2.5
+    hit_abrupt_large_jump_px: float = 270.0
+    hit_cross_segment_anchor_max_gap_seconds: float = 0.22
+    hit_pose_assist_speed_change_min_turn_deg: float = 20.0
     _points: deque[tuple[float, int, float, float, float, int, bool, float]] = field(default_factory=deque)
     _hit_markers: deque[tuple[float, float, float]] = field(default_factory=deque)
     _last_hit_time_s: float = -999.0
@@ -136,13 +152,13 @@ class TrackTrailRenderer:
                 )
             )
             self._last_visible_timestamp_s = timestamp_s
-            if self._is_hit_event(timestamp_s, frame_shape):
-                hit_time_s, hit_frame_id, hit_x, hit_y, *_ = self._points[-2]
-                self._hit_markers.append((timestamp_s, hit_x, hit_y))
+            hit_detection = self._hit_detection(frame_shape)
+            if hit_detection is not None:
+                self._hit_markers.append((hit_detection.timestamp_s, hit_detection.x, hit_detection.y))
                 self._last_hit_event = {
-                    "frame_id": int(hit_frame_id),
-                    "timestamp_ms": int(round(hit_time_s * 1000.0)),
-                    "ball_xy": [float(hit_x), float(hit_y)],
+                    "frame_id": int(hit_detection.frame_id),
+                    "timestamp_ms": int(round(hit_detection.timestamp_s * 1000.0)),
+                    "ball_xy": [float(hit_detection.x), float(hit_detection.y)],
                 }
         elif self._last_visible_timestamp_s is not None:
             self._segment_id += 1
@@ -170,6 +186,25 @@ class TrackTrailRenderer:
             self._hit_markers.popleft()
 
     def _draw_trail(self, canvas: np.ndarray, timestamp_s: float) -> None:
+        trail_points = list(self._points)
+        for previous, current in zip(trail_points, trail_points[1:]):
+            _, _prev_frame_id, prev_x, prev_y, _prev_score, prev_segment_id, *_ = previous
+            point_time, _frame_id, x, y, _score, segment_id, *_ = current
+            if segment_id != prev_segment_id:
+                continue
+            if hypot(x - prev_x, y - prev_y) > self.trail_break_threshold_px:
+                continue
+            age = max(0.0, timestamp_s - point_time)
+            fade = max(0.15, 1.0 - age / max(self.history_seconds, 1e-6))
+            color = tuple(int(channel * fade) for channel in TRAIL_COLOR)
+            cv2.line(
+                canvas,
+                (int(round(prev_x)), int(round(prev_y))),
+                (int(round(x)), int(round(y))),
+                color,
+                2,
+            )
+
         for point_time, _frame_id, x, y, *_ in self._points:
             age = max(0.0, timestamp_s - point_time)
             fade = max(0.15, 1.0 - age / max(self.history_seconds, 1e-6))
@@ -194,19 +229,17 @@ class TrackTrailRenderer:
             1,
         )
 
-    def _is_hit_event(self, timestamp_s: float, frame_shape: tuple[int, ...] | None) -> bool:
+    def _hit_detection(self, frame_shape: tuple[int, ...] | None) -> _HitDetection | None:
         if len(self._points) < 3:
-            return False
-        if timestamp_s - self._last_hit_time_s < self.hit_cooldown_seconds:
-            return False
+            return None
 
         prev, mid, current = self._points[-3], self._points[-2], self._points[-1]
-        if len({prev[5], mid[5], current[5]}) > 1:
-            return False
+        same_segment = len({prev[5], mid[5], current[5]}) == 1
+        cross_segment_abrupt = prev[5] != mid[5] and mid[5] == current[5]
         dt_before = mid[0] - prev[0]
         dt_after = current[0] - mid[0]
         if dt_before <= 1e-6 or dt_after <= 1e-6:
-            return False
+            return None
 
         vx_before = mid[2] - prev[2]
         vy_before = mid[3] - prev[3]
@@ -215,7 +248,7 @@ class TrackTrailRenderer:
         dist_before = hypot(vx_before, vy_before)
         dist_after = hypot(vx_after, vy_after)
         if min(dist_before, dist_after) < 3.0:
-            return False
+            return None
 
         speed_before = dist_before / dt_before
         speed_after = dist_after / dt_after
@@ -228,9 +261,9 @@ class TrackTrailRenderer:
             else self.hit_min_speed_px_per_sec
         )
         if max(speed_before, speed_after) < min_speed:
-            return False
+            return None
         if self._looks_like_top_exit(prev, mid, current, frame_shape):
-            return False
+            return None
         if self._looks_like_floor_bounce(
             prev,
             mid,
@@ -240,14 +273,36 @@ class TrackTrailRenderer:
             dist_before=dist_before,
             dist_after=dist_after,
         ) and not has_pose_override:
-            return False
+            return None
         if self._looks_like_person_occlusion(prev, mid, current) and not has_pose_override:
-            return False
+            return None
+
+        has_reliable_track = min(prev[4], mid[4], current[4]) >= self.hit_min_track_score
+        same_segment_abrupt = same_segment and self._looks_like_abrupt_hit(
+            mid,
+            current,
+            dist_before=dist_before,
+            dist_after=dist_after,
+        )
+        cross_segment_anchor = (
+            self._cross_segment_abrupt_anchor(mid, current, dist_after=dist_after)
+            if cross_segment_abrupt
+            else None
+        )
+        if not same_segment and cross_segment_anchor is None:
+            return None
+        if same_segment and not has_reliable_track and not same_segment_abrupt:
+            return None
 
         turn_cos = (vx_before * vx_after + vy_before * vy_after) / (dist_before * dist_after)
         turn_deg = degrees(acos(max(-1.0, min(1.0, turn_cos))))
         slower_speed = max(min(speed_before, speed_after), 1e-6)
         speed_change = max(speed_before, speed_after) / slower_speed
+
+        if cross_segment_anchor is not None:
+            return self._commit_hit_detection(cross_segment_anchor, self.hit_cooldown_seconds)
+        if same_segment_abrupt:
+            return self._commit_hit_detection(mid, self.hit_cooldown_seconds)
 
         is_direction_change = turn_deg >= self.hit_min_turn_deg
         is_speed_snap = (
@@ -256,13 +311,74 @@ class TrackTrailRenderer:
         )
         is_pose_assisted = has_pose_assist and (
             turn_deg >= self.hit_pose_assist_relaxed_turn_deg
-            or speed_change >= self.hit_pose_assist_relaxed_speed_change_ratio
+            or (
+                speed_change >= self.hit_pose_assist_relaxed_speed_change_ratio
+                and turn_deg >= self.hit_pose_assist_speed_change_min_turn_deg
+            )
         )
         if not (is_direction_change or is_speed_snap or is_pose_assisted):
-            return False
+            return None
 
-        self._last_hit_time_s = timestamp_s
-        return True
+        return self._commit_hit_detection(mid, self.hit_cooldown_seconds)
+
+    def _commit_hit_detection(
+        self,
+        point: tuple[float, int, float, float, float, int, bool, float],
+        cooldown_seconds: float,
+    ) -> _HitDetection | None:
+        point_time, frame_id, x, y, *_ = point
+        if point_time - self._last_hit_time_s < cooldown_seconds:
+            return None
+        self._last_hit_time_s = point_time
+        return _HitDetection(timestamp_s=point_time, frame_id=int(frame_id), x=float(x), y=float(y))
+
+    def _looks_like_abrupt_hit(
+        self,
+        mid: tuple[float, int, float, float, float, int, bool, float],
+        current: tuple[float, int, float, float, float, int, bool, float],
+        *,
+        dist_before: float,
+        dist_after: float,
+    ) -> bool:
+        min_score = max(0.0, float(self.hit_abrupt_min_score))
+        if mid[4] < min_score or current[4] < min_score:
+            return False
+        return self._abrupt_jump_passes(dist_before, dist_after)
+
+    def _cross_segment_abrupt_anchor(
+        self,
+        mid: tuple[float, int, float, float, float, int, bool, float],
+        current: tuple[float, int, float, float, float, int, bool, float],
+        *,
+        dist_after: float,
+    ) -> tuple[float, int, float, float, float, int, bool, float] | None:
+        min_score = max(0.0, float(self.hit_abrupt_min_score))
+        if mid[4] < min_score or current[4] < min_score:
+            return None
+
+        max_gap = max(0.0, float(self.hit_cross_segment_anchor_max_gap_seconds))
+        min_anchor_score = max(0.0, float(self.hit_min_track_score))
+        for point in reversed(list(self._points)[:-2]):
+            if point[5] == mid[5]:
+                continue
+            if mid[0] - point[0] > max_gap:
+                return None
+            if point[4] < min_anchor_score:
+                continue
+
+            jump = hypot(mid[2] - point[2], mid[3] - point[3])
+            if self._abrupt_jump_passes(jump, dist_after):
+                return point
+            return None
+        return None
+
+    def _abrupt_jump_passes(self, jump: float, dist_after: float) -> bool:
+        min_jump = max(0.0, float(self.hit_abrupt_min_jump_px))
+        if jump < min_jump:
+            return False
+        large_jump = max(min_jump, float(self.hit_abrupt_large_jump_px))
+        min_ratio = max(1.0, float(self.hit_abrupt_min_jump_ratio))
+        return jump >= large_jump or jump >= dist_after * min_ratio
 
     def _looks_like_top_exit(
         self,
