@@ -31,6 +31,11 @@ class TrajectoryEventDetectorConfig:
     max_hit_neighbor_gap: int = 3
     hit_top_ignore_ratio: float = 0.08
     hit_top_ignore_px: float = 36.0
+    landing_top_ignore_ratio: float = 0.12
+    landing_top_ignore_px: float = 36.0
+    landing_apex_ignore_ratio: float = 0.35
+    landing_apex_lookback_frames: int = 10
+    landing_apex_min_upward_px: float = 5.0
     acc_threshold: float = 3.0
     min_height_diff: float = 5.0
     min_peak_speed: float = 10.0
@@ -41,8 +46,10 @@ class TrajectoryEventDetectorConfig:
     edge_margin: float = 20.0
     history_frames: int = 180
     confirmation_frames: int = 1
-    trajectory_end_missing_frames: int = 3
-    visibility_drop_missing_frames: int = 3
+    trajectory_end_missing_frames: int = 12
+    visibility_drop_missing_frames: int = 12
+    rally_end_missing_frames: int = 18
+    tracking_lost_end_max_speed: float = 120.0
     event_cooldown_seconds: float = 0.18
     max_event_lag_frames: int = 12
 
@@ -145,6 +152,14 @@ class TrajectoryEventCandidateGenerator:
                 ("landing", "speed_drop", 0.80, self._check_speed_drop(t, n, vis, speed)),
             ):
                 if features is not None:
+                    if event_type == "landing" and not self._is_landing_motion_allowed(
+                        t,
+                        n,
+                        y_arr,
+                        vis,
+                        img_height,
+                    ):
+                        continue
                     primary = {"event_type": event_type, "rule": rule, "confidence": confidence}
                     primary_features = features
                     break
@@ -208,7 +223,7 @@ class TrajectoryEventCandidateGenerator:
             candidates.append(candidate)
 
         if include_trajectory_end:
-            self._check_trajectory_end(x_arr, y_arr, vis, speed, candidates)
+            self._check_trajectory_end(x_arr, y_arr, vis, speed, img_height, candidates)
         merged = self._merge_nearby_candidates(candidates)
         merged.sort(key=lambda item: int(item["frame"]))
         return merged
@@ -391,6 +406,8 @@ class TrajectoryEventCandidateGenerator:
     ) -> dict[str, float] | None:
         if t <= 0 or t >= n or visibility[t] != 1 or visibility[t - 1] != 1:
             return None
+        if not self._all_visible(visibility, t - 2, min(n, t + 2)):
+            return None
         v_prev = float(speed[t - 1])
         v_curr = float(speed[t])
         if v_curr > self.config.low_speed_threshold:
@@ -418,6 +435,8 @@ class TrajectoryEventCandidateGenerator:
     ) -> dict[str, float] | None:
         if t <= 0 or t >= n or visibility[t] != 1:
             return None
+        if not self._all_visible(visibility, t - 2, min(n, t + self.config.hold_window)):
+            return None
         v_curr = float(speed[t])
         v_prev = float(speed[t - 1]) if visibility[t - 1] == 1 else v_curr + 1e-6
         if v_curr > self.config.low_speed_threshold or v_prev <= self.config.low_speed_threshold:
@@ -439,6 +458,8 @@ class TrajectoryEventCandidateGenerator:
         speed: np.ndarray,
     ) -> dict[str, float] | None:
         if t <= 0 or t + 2 >= n:
+            return None
+        if not self._all_visible(visibility, t - 2, t + 3):
             return None
         speed_before = float(speed[t - 1])
         speed_current = float(speed[t])
@@ -528,7 +549,22 @@ class TrajectoryEventCandidateGenerator:
                 "confidence": 0.50,
                 "features": features,
             }
-        return {"event_type": "landing", "rule": "visibility_drop", "confidence": 0.55, "features": features}
+        if (
+            missing_after >= max(1, int(self.config.rally_end_missing_frames))
+            and recent_speed <= float(self.config.tracking_lost_end_max_speed)
+        ):
+            return {
+                "event_type": "landing",
+                "rule": "tracking_lost_rally_end",
+                "confidence": 0.60,
+                "features": features,
+            }
+        return {
+            "event_type": "out_of_frame",
+            "rule": "visibility_drop_tracking_lost",
+            "confidence": 0.35,
+            "features": features,
+        }
 
     def _consecutive_missing_after(self, t: int, n: int, visibility: np.ndarray) -> int:
         count = 0
@@ -559,6 +595,11 @@ class TrajectoryEventCandidateGenerator:
         v_x = float((x[t] - x[prev_idx]) / gap)
         v_y = float((y[t] - y[prev_idx]) / gap)
         return {"v_x": v_x, "v_y": v_y, "speed_before": float(np.hypot(v_x, v_y))}
+
+    def _all_visible(self, visibility: np.ndarray, start: int, end: int) -> bool:
+        if start < 0 or end > len(visibility) or start >= end:
+            return False
+        return bool(np.all(visibility[start:end] == 1))
 
     def _is_moving_out_of_frame(
         self,
@@ -625,6 +666,7 @@ class TrajectoryEventCandidateGenerator:
         y: np.ndarray,
         visibility: np.ndarray,
         speed: np.ndarray,
+        img_height: int,
         candidates: list[dict[str, object]],
     ) -> None:
         visible_indices = np.where(visibility == 1)[0]
@@ -640,6 +682,8 @@ class TrajectoryEventCandidateGenerator:
             return
         tail_start = self._find_tail_low_speed_start(speed, visibility, last_visible_idx)
         if tail_start is not None:
+            if not self._is_landing_motion_allowed(tail_start, len(y), y, visibility, img_height):
+                return
             candidates.append(
                 {
                     "frame": tail_start,
@@ -658,23 +702,6 @@ class TrajectoryEventCandidateGenerator:
                 }
             )
             return
-        candidates.append(
-            {
-                "frame": last_visible_idx,
-                "x": float(x[last_visible_idx]),
-                "y": float(y[last_visible_idx]),
-                "event_type": "landing",
-                "rule": "trajectory_end",
-                "confidence": 0.65,
-                "all_rules": ["trajectory_end"],
-                "auxiliary_rules": [],
-                "features": {
-                    "speed": float(speed[last_visible_idx]),
-                    "recent_avg_speed": float(np.mean(speed[max(0, last_visible_idx - 3) : last_visible_idx + 1])),
-                    "landing_type": "tail_fallback",
-                },
-            }
-        )
 
     def _find_tail_low_speed_start(
         self,
@@ -704,6 +731,38 @@ class TrajectoryEventCandidateGenerator:
             return None
         return tail_start
 
+    def _is_landing_motion_allowed(
+        self,
+        t: int,
+        n: int,
+        y: np.ndarray,
+        visibility: np.ndarray,
+        img_height: int,
+    ) -> bool:
+        if not self._is_landing_height_allowed(y[t], img_height):
+            return False
+        apex_band = float(img_height) * max(0.0, float(self.config.landing_apex_ignore_ratio))
+        if float(y[t]) > apex_band:
+            return True
+        lookback = max(
+            self.config.min_visible_before,
+            int(self.config.max_hit_neighbor_gap),
+            int(self.config.landing_apex_lookback_frames),
+        )
+        start = max(0, t - lookback)
+        previous_visible_y = y[start:t][visibility[start:t] == 1]
+        if len(previous_visible_y) == 0:
+            return True
+        upward_delta = float(np.max(previous_visible_y) - y[t])
+        return upward_delta < float(self.config.landing_apex_min_upward_px)
+
+    def _is_landing_height_allowed(self, y: float, img_height: int) -> bool:
+        top_band = max(
+            float(self.config.landing_top_ignore_px),
+            float(img_height) * max(0.0, float(self.config.landing_top_ignore_ratio)),
+        )
+        return float(y) > top_band
+
     def _merge_nearby_candidates(self, candidates: list[dict[str, object]]) -> list[dict[str, object]]:
         if len(candidates) <= 1:
             return candidates
@@ -718,6 +777,7 @@ class TrajectoryEventCandidateGenerator:
             "visibility_drop_edge": 3,
             "visibility_drop_upward": 3,
             "visibility_drop_high_altitude": 3,
+            "visibility_drop_tracking_lost": 2,
             "trajectory_end": 3,
             "y_local_max": 2,
             "speed_local_max": 2,
@@ -797,6 +857,9 @@ class RealtimeTrajectoryEventDetector:
             if lag_frames < self.config.confirmation_frames:
                 continue
             max_lag = int(self.config.max_event_lag_frames)
+            rule = str(candidate.get("rule", ""))
+            if rule == "tracking_lost_rally_end":
+                max_lag = max(max_lag, int(self.config.rally_end_missing_frames) + self.config.confirmation_frames)
             if max_lag >= 0 and lag_frames > max_lag:
                 continue
             event = self._event_from_candidate(candidate, samples[local_index])

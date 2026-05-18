@@ -58,6 +58,7 @@ class FrameLogExporterTest(unittest.TestCase):
         self.assertEqual(record["frame_id"], 12)
         self.assertEqual(record["timestamp_ms"], 480)
         self.assertEqual(record["ball"], {"xy": [123.0, 45.0], "visible": 1, "score": 0.77})
+        self.assertIsNone(record["court"])
         self.assertEqual(record["pose"][0]["person_id"], 1)
         self.assertEqual(record["pose"][0]["bbox"], [10.0, 20.0, 70.0, 160.0])
         self.assertEqual(record["pose"][0]["keypoints"], [[12.0, 24.0], [30.0, 45.0]])
@@ -66,6 +67,38 @@ class FrameLogExporterTest(unittest.TestCase):
         self.assertEqual(record["trajectory_event"]["event_type"], "landing")
         self.assertEqual(record["trajectory_event"]["rule"], "speed_step")
         self.assertEqual(record["landing_event"]["ball_xy"], [123.0, 45.0])
+
+    def test_frame_log_can_include_court_prediction_summary(self) -> None:
+        result = FrameResult(
+            frame_id=4,
+            pose=[],
+            track=TrackResult(ball_xy=[-1.0, -1.0], visible=0, score=0.1),
+        )
+
+        record = frame_result_log_record(
+            result,
+            timestamp_ms=160,
+            court_prediction={
+                "valid": True,
+                "attempted": True,
+                "updated": True,
+                "update_type": "reliable update",
+                "status": "reliable update",
+                "confidence": 0.93,
+                "candidate_confidence": 0.91,
+                "reason": "YOLO segmentation mask",
+                "scheme": "shuttlecourt_seg",
+                "corners": [[10.0, 20.0], [80.0, 20.0], [90.0, 120.0], [8.0, 120.0]],
+                "metrics": {"components": {"candidate_rank": 0.88, "seg_quality": 0.9}},
+                "detect_ms": 15.5,
+                "rejected_count": 0,
+            },
+        )
+
+        self.assertTrue(record["court"]["valid"])
+        self.assertEqual(record["court"]["scheme"], "shuttlecourt_seg")
+        self.assertEqual(record["court"]["corners"][0], [10.0, 20.0])
+        self.assertEqual(record["court"]["metrics"]["components"]["candidate_rank"], 0.88)
 
     def test_write_frame_log_jsonl_writes_one_json_object_per_line(self) -> None:
         buffer = StringIO()

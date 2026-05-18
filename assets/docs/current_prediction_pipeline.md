@@ -397,8 +397,8 @@ relock 时会先 `_drop_lock()` 清空旧锁定状态，再 accept 新 measureme
 `src/postprocess/trajectory_events.py` 从 `D:\Github\TrackNet-V3-based-Badminton\bounce_detection` 迁移了规则式事件候选生成逻辑。它现在是主击球事件来源，并同时输出：
 
 - `hit`：击球候选，规则包括 `vy_reversal`、`vx_reversal`、`acceleration_peak`、`y_local_max`、`speed_local_max`。
-- `landing`：落地点候选，规则包括 `speed_step`、`low_speed_start`、`speed_drop`、`visibility_drop`、`trajectory_end`。
-- `out_of_frame`：出画/丢失候选，规则包括 `visibility_drop_edge`、`visibility_drop_upward`、`visibility_drop_high_altitude`。
+- `landing`：落地点候选，规则包括 `speed_step`、`low_speed_start`、`speed_drop`、`trajectory_end`、`tracking_lost_rally_end`。
+- `out_of_frame`：出画/丢失候选，规则包括 `visibility_drop_edge`、`visibility_drop_upward`、`visibility_drop_high_altitude`、`visibility_drop_tracking_lost`。
 
 当前主 `hit_event` 会额外做收紧过滤：
 

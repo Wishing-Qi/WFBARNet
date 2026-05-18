@@ -42,6 +42,11 @@ class OpenCVCourtLineConfig:
     snap_response_threshold: float = 0.18
     max_refine_corner_shift_ratio: float = 0.045
     green_side_offset_px: float = 14.0
+    min_outer_width_ratio: float = 0.08
+    min_outer_depth_ratio: float = 0.08
+    min_outer_width_depth_ratio: float = 0.18
+    max_outer_width_depth_ratio: float = 5.5
+    max_transverse_angle_deg: float = 35.0
     reliable_conf: float = 0.75
     medium_conf: float = 0.55
     smooth_alpha_reliable: float = 0.45

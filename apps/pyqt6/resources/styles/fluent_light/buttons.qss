@@ -31,6 +31,7 @@ QPushButton#btnSelectVideo,
 QPushButton#btnForceStop,
 QPushButton#btnPreviewMode,
 QPushButton#btnCameraMode,
+QPushButton#btnBatchMode,
 QPushButton#btnRefreshCameras {
     min-height: 20px;
     padding-top: 4px;
@@ -38,7 +39,8 @@ QPushButton#btnRefreshCameras {
 }
 
 QPushButton#btnPreviewMode,
-QPushButton#btnCameraMode {
+QPushButton#btnCameraMode,
+QPushButton#btnBatchMode {
     min-width: 88px;
     color: #64748B;
     background-color: #F8FAFC;
@@ -53,7 +55,8 @@ QPushButton#btnCameraMode {
 }
 
 QPushButton#btnPreviewMode:checked,
-QPushButton#btnCameraMode:checked {
+QPushButton#btnCameraMode:checked,
+QPushButton#btnBatchMode:checked {
     color: #0F6CBD;
     background-color: #FFFFFF;
     border-color: #E2E8F0;
@@ -62,7 +65,8 @@ QPushButton#btnCameraMode:checked {
 }
 
 QPushButton#btnPreviewMode:hover:!checked,
-QPushButton#btnCameraMode:hover:!checked {
+QPushButton#btnCameraMode:hover:!checked,
+QPushButton#btnBatchMode:hover:!checked {
     color: #0F172A;
     background-color: #F1F5F9;
 }

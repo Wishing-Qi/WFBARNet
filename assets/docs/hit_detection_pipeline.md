@@ -48,14 +48,21 @@ TrackNet 原始候选
 - `speed_step`
 - `low_speed_start`
 - `speed_drop`
-- `visibility_drop`
 - `trajectory_end`
+- `tracking_lost_rally_end`
+
+速度类落地规则只在连续可见窗口内生效，避免短暂丢球后的 `[-1,-1]` 缺失点污染速度并制造假减速。低速类落地规则会忽略画面顶部高空区；如果球还在画面上半部且最近一段窗口仍呈向上运动，也不会把低速点当作落地，避免把高远球顶点误判为死球。`trajectory_end` 只在轨迹尾部已经进入低速段时触发，不再把高速丢球尾点兜底为落地。
+
+`tracking_lost_rally_end` 是延迟确认规则：非顶部/非边缘 tracking lost 持续达到阈值，且丢失前速度不像离群跳点时，才把该丢失点确认为回合结束。
 
 出画事件来自：
 
 - `visibility_drop_edge`
 - `visibility_drop_upward`
 - `visibility_drop_high_altitude`
+- `visibility_drop_tracking_lost`
+
+普通 `visibility_drop` 不再生成落地事件，而是标记为 `visibility_drop_tracking_lost`。出画事件用于标记跟踪丢失或画面边缘离开，不单独判定回合结束；回合状态目前只由 `landing` 事件结束。
 
 ## 可视化
 

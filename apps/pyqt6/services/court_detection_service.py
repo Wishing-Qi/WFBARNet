@@ -7,10 +7,12 @@ from time import monotonic
 import numpy as np
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
-from src.court.opencv_court_detector import (
+from src.court import (
+    CourtLineBackend,
+    CourtLineConfig,
+    CourtLineDetector,
     CourtLinePrediction,
-    OpenCVCourtLineConfig,
-    OpenCVCourtLineDetector,
+    create_court_line_detector,
 )
 
 
@@ -23,18 +25,20 @@ class _PendingCourtFrame:
     force: bool = True
 
 
-class OpenCVCourtDetectionWorker(QThread):
+class CourtDetectionWorker(QThread):
     resultReady = pyqtSignal(object)
     failed = pyqtSignal(str)
 
     def __init__(
         self,
-        config: OpenCVCourtLineConfig | None = None,
+        config: CourtLineConfig | None = None,
         *,
+        backend: CourtLineBackend = "shuttlecourt_seg",
         submit_interval_s: float = 0.75,
     ) -> None:
         super().__init__()
-        self._config = config or OpenCVCourtLineConfig()
+        self._backend = backend
+        self._config = config
         self._submit_interval_s = max(0.1, float(submit_interval_s))
         self._condition = Condition()
         self._latest_lock = Lock()
@@ -102,7 +106,7 @@ class OpenCVCourtDetectionWorker(QThread):
             self._condition.notify()
 
     def run(self) -> None:
-        detector = OpenCVCourtLineDetector(self._config)
+        detector: CourtLineDetector = create_court_line_detector(self._backend, config=self._config)
 
         while True:
             with self._condition:
@@ -148,16 +152,27 @@ class CourtDetectionService(QObject):
     resultReady = pyqtSignal(object)
     failed = pyqtSignal(str)
 
-    def __init__(self, config: OpenCVCourtLineConfig | None = None, *, submit_interval_s: float = 0.75) -> None:
+    def __init__(
+        self,
+        config: CourtLineConfig | None = None,
+        *,
+        backend: CourtLineBackend = "shuttlecourt_seg",
+        submit_interval_s: float = 0.75,
+    ) -> None:
         super().__init__()
-        self._config = config or OpenCVCourtLineConfig()
+        self._backend = backend
+        self._config = config
         self._submit_interval_s = submit_interval_s
-        self._worker: OpenCVCourtDetectionWorker | None = None
+        self._worker: CourtDetectionWorker | None = None
 
     def start(self) -> None:
         if self._worker is not None and self._worker.isRunning():
             return
-        self._worker = OpenCVCourtDetectionWorker(self._config, submit_interval_s=self._submit_interval_s)
+        self._worker = CourtDetectionWorker(
+            self._config,
+            backend=self._backend,
+            submit_interval_s=self._submit_interval_s,
+        )
         self._worker.resultReady.connect(self._on_worker_result_ready)
         self._worker.failed.connect(self.failed.emit)
         self._worker.start()
@@ -201,7 +216,14 @@ class CourtDetectionService(QObject):
             self.resultReady.emit(prediction.to_dict())
 
 
-def create_court_detection_service(config: OpenCVCourtLineConfig | None = None) -> CourtDetectionService:
-    service = CourtDetectionService(config)
+OpenCVCourtDetectionWorker = CourtDetectionWorker
+
+
+def create_court_detection_service(
+    config: CourtLineConfig | None = None,
+    *,
+    backend: CourtLineBackend = "shuttlecourt_seg",
+) -> CourtDetectionService:
+    service = CourtDetectionService(config, backend=backend)
     service.start()
     return service

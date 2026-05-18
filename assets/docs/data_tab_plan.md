@@ -31,13 +31,14 @@
 
 | 字段 | 显示名 | 含义 |
 | --- | --- | --- |
-| rally_start_ms | 回合开始时间 | 当前回合第一帧或第一条有效轨迹时间 |
-| rally_end_ms | 回合结束时间 | 当前回合最后一帧、落地或出画事件时间 |
+| rally_start_ms | 回合开始时间 | 第一段稳定球飞行或第一条 `hit` 事件时间 |
+| rally_end_ms | 回合结束时间 | 回合中显示当前最后一帧时间；回合结束后显示落地事件时间 |
 | rally_duration_s | 回合时长 | `(rally_end_ms - rally_start_ms) / 1000` |
+| rally_state | 回合状态 | `未开始`、`回合中` 或 `回合结束` |
 | processed_frames | 处理帧数 | 当前回合参与统计的帧数 |
 | rally_hit_count | 该回合击球次数 | 当前回合内 `hit_event` 或 BST 击球结果总数 |
 | landing_count | 落点次数 | 当前回合内 `landing_event` 数量 |
-| out_of_frame_count | 出画次数 | 当前回合内 `out_of_frame` 数量 |
+| out_of_frame_count | 出画/跟踪丢失次数 | 当前回合内 `out_of_frame` 数量 |
 
 ### 双方球员运动指标
 

@@ -87,6 +87,7 @@ def frame_result_log_record(
     result: FrameResult,
     *,
     timestamp_ms: int | None = None,
+    court_prediction: object | None = None,
     hit_event: object | None = None,
     trajectory_event: object | None = None,
     landing_event: object | None = None,
@@ -96,6 +97,7 @@ def frame_result_log_record(
         "timestamp_ms": int(timestamp_ms) if timestamp_ms is not None else None,
         "ball": _track_log_record(result.track),
         "pose": [_pose_log_record(person) for person in result.pose],
+        "court": _court_log_record(court_prediction),
         "hit_event": _hit_event_log_record(hit_event),
         "trajectory_event": _trajectory_event_log_record(trajectory_event),
         "landing_event": _trajectory_event_log_record(landing_event),
@@ -125,6 +127,53 @@ def _pose_log_record(person: PersonPoseResult) -> dict[str, object]:
         "keypoints": [[float(point[0]), float(point[1])] for point in person.keypoints if len(point) >= 2],
         "keypoint_scores": [float(score) for score in person.scores],
     }
+
+
+def _court_log_record(court_prediction: object | None) -> dict[str, object] | None:
+    if court_prediction is None:
+        return None
+    payload = court_prediction if isinstance(court_prediction, dict) else None
+    to_dict = getattr(court_prediction, "to_dict", None)
+    if payload is None and callable(to_dict):
+        value = to_dict()
+        payload = value if isinstance(value, dict) else None
+    if payload is None:
+        return None
+    return {
+        "valid": bool(payload.get("valid", False)),
+        "attempted": bool(payload.get("attempted", False)),
+        "updated": bool(payload.get("updated", False)),
+        "update_type": str(payload.get("update_type", "")),
+        "status": str(payload.get("status", "")),
+        "confidence": float(payload.get("confidence", 0.0) or 0.0),
+        "candidate_confidence": _optional_float(payload.get("candidate_confidence")),
+        "reason": str(payload.get("reason", "")),
+        "scheme": str(payload.get("scheme", "")),
+        "corners": _points_log_record(payload.get("corners")),
+        "metrics": payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {},
+        "detect_ms": float(payload.get("detect_ms", 0.0) or 0.0),
+        "rejected_count": int(payload.get("rejected_count", 0) or 0),
+    }
+
+
+def _points_log_record(points: object) -> list[list[float]]:
+    if not isinstance(points, (list, tuple)):
+        return []
+    output: list[list[float]] = []
+    for point in points:
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            continue
+        output.append([float(point[0]), float(point[1])])
+    return output
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _hit_event_log_record(hit_event: object | None) -> dict[str, object] | None:

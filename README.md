@@ -1,67 +1,181 @@
 # WFBARNet
 
-WFBARNet is a badminton video analysis project. The current codebase combines ball tracking, pose estimation, result export, visualization, and a local PyQt6 desktop UI.
+WFBARNet 是一个面向羽毛球视频分析的本地智能分析系统，主要用于从比赛、训练或摄像头画面中提取可量化的运动信息。系统以连续视频帧为输入，围绕“羽毛球、球员、球场”三个对象建立分析流程：通过轨迹模型定位羽毛球位置，通过姿态模型获取球员人体关键点，通过球场线检测估计图像平面与标准球场平面的映射关系。在此基础上，系统将像素坐标转换为场地坐标，进一步识别击球、落点、出画等轨迹事件，并统计回合时长、击球次数、球员移动距离、站位热力分布和数据可靠性等指标。
 
-## Current Layout
+项目侧重本地化、可解释和可调试的分析流程，既提供面向使用者的视频可视化界面，也保留适合算法验证的数据导出和调试日志。它可以用于训练复盘、技战术观察、批量视频数据整理和后续模型实验。系统的分析结果依赖视频质量、拍摄角度、球场线可见性、模型权重和硬件性能，因此更适合作为辅助分析工具，而不是自动裁判或唯一判定依据。
 
-```text
-WFBARNet/
-  main.py                         # CLI-oriented runtime builders
-  configs/default_infer.json       # default inference config
-  src/                             # core inference package
-    models/                        # TrackNet, pose backends, TensorRT backend
-    preprocess/                    # frame preprocessing
-    postprocess/                   # heatmap decoding and track filtering
-    runners/                       # pose, track, realtime, and unified runners
-    builders/                      # downstream feature builders
-    utils/                         # video, export, visualization, structures
-  apps/
-    pyqt6/                         # current desktop application
-  tools/
-    demo/                          # runnable CLI demos
-    benchmarks/                    # local performance benchmark scripts
-    mmpose/                        # MMPose helper files
-  assets/
-    weights/                       # local model weights and exported artifacts
-    docs/                          # project reference material
-  tests/                           # unit tests
-```
+## 功能模块
 
-## Main Entry Points
+### 视频与实时分析
 
-- PyQt6 desktop app: `python -m apps.pyqt6.main`
-- CLI/default pipeline: edit `USER_CONFIG` in `main.py`, then run `python main.py`
-- Unified demo: `python tools/demo/run_unified_infer.py --source path/to/video.mp4`
-- Track-only demo: `python tools/demo/run_track_only.py --source path/to/video.mp4`
-- Runtime benchmark: `python tools/benchmarks/benchmark_runtime_latency.py --source path/to/video.mp4`
+系统支持对本地视频、摄像头实时画面和批量视频进行分析。视频分析过程中可以同步显示原始画面、球轨迹、人体骨架、球场线投影、击球事件标记和实时统计结果。
 
-## Models And Data
+### 羽毛球轨迹跟踪
 
-Expected local model paths:
+轨迹模块负责在连续视频帧中定位羽毛球位置。系统使用 TrackNetV3 风格的轨迹模型输出羽毛球热力图，再通过候选点解码和轨迹后处理得到逐帧球点。
 
-- `assets/weights/pose/yolo26s-pose.pt`
-- `assets/weights/track/model_best.pt`
-- optional TensorRT export files under `assets/weights/track/`
-- optional BST weights under `assets/weights/bst/`
+该模块关注的问题包括：
 
-Large local files are intentionally ignored by git:
+- 羽毛球小目标检测。
+- 高速运动下的短时模糊和漏检。
+- 多候选热点中的球点选择。
+- 轨迹短时丢失后的连续性修复。
+- 可见、不可见和出画状态判断。
 
-- videos under `videos/`
-- generated outputs under `outputs/`
-- Python caches
-- Ultralytics cache files
-- TensorRT/ONNX export artifacts
+### 球员姿态估计
 
-Use Git LFS or external release artifacts if these files need to be shared.
+姿态模块负责检测场上球员的人体框和关键点。系统主要使用 YOLO pose 后端，也保留 MMPose 等姿态后端的接入能力。
 
-## Tests
+姿态结果用于：
 
-```powershell
-python -m unittest discover tests
-```
+- 绘制人体骨架。
+- 估计球员脚下位置。
+- 区分上方和下方球员。
+- 统计球员移动距离和站位变化。
+- 为击球动作识别提供人体关键点序列。
 
-The benchmark script is not a unit test and lives in `tools/benchmarks/`.
+### 球场线检测与坐标映射
 
-## Notes
+球场模块负责识别画面中的羽毛球场线，并估计图像平面到标准球场平面的单应性关系。得到场地映射后，系统可以把图像中的球点和球员位置转换到以厘米为单位的球场坐标。
 
-`apps/pyqt6/` is the active UI. `apps/desktop_gui/` is kept as a legacy DearPyGui implementation; remove or archive it only after confirming it is no longer needed.
+该能力主要用于：
+
+- 在视频画面上叠加球场线。
+- 将球员位置投影到标准羽毛球场。
+- 生成球员位置热力图。
+- 统计击球区域和移动方向。
+- 判断数据可靠性，例如球场检测是否有效。
+
+### 轨迹事件识别
+
+系统基于滤波后的羽毛球轨迹识别关键事件，包括：
+
+- `hit`：击球候选事件。
+- `landing`：落点候选事件。
+- `out_of_frame`：出画或轨迹中断事件。
+
+事件检测主要使用轨迹速度、方向变化、局部极值、加速度变化和可见性变化等规则。击球事件会继续作为动作识别和回合统计的输入。
+
+### 击球动作识别
+
+当本地提供 BST 动作识别权重时，系统可以在击球事件附近截取时序片段，结合人体姿态、羽毛球位置和球员场地位置进行击球动作分类。
+
+动作识别输出通常包括：
+
+- 动作类别。
+- 预测置信度。
+- Top-K 候选类别。
+- 对应的击球时间和帧号。
+
+该模块是可选能力；没有动作识别权重时，系统仍可完成轨迹、姿态、球场和回合统计分析。
+
+### 回合数据统计
+
+系统会把轨迹、姿态、球场坐标和事件结果汇总为回合级数据。统计内容包括：
+
+- 回合时长。
+- 击球次数。
+- 球员移动距离。
+- 平均速度和最大速度。
+- 启停次数。
+- 高强度移动次数。
+- 前场、中场、后场击球分布。
+- 球点可见率、姿态有效率和球场有效率。
+
+这些数据可用于训练复盘、批量视频统计和后续数据分析。
+
+## 技术路线
+
+### 1. 视频输入与帧预处理
+
+系统从视频文件或摄像头读取帧流，并按模型需要构造输入。轨迹模型使用相邻三帧组成时间窗口，以便捕捉羽毛球的短时运动信息；姿态模型和球场检测模块则直接使用当前帧。
+
+预处理包括：
+
+- 视频帧读取和时间戳计算。
+- 图像缩放和颜色空间转换。
+- TrackNet 三帧窗口构造。
+- 推理设备选择，包括 CPU、CUDA 和可选 TensorRT。
+
+### 2. 多路视觉推理
+
+每一帧会进入多条视觉推理分支：
+
+- 轨迹分支输出羽毛球热力图或候选点。
+- 姿态分支输出球员框、人体关键点和关键点置信度。
+- 球场分支输出球场线、角点、模板投影和单应性矩阵。
+
+这些分支在运行时可以按不同频率执行。例如姿态推理可以间隔若干帧运行，以降低实时分析的计算负担。
+
+### 3. 轨迹解码与滤波
+
+TrackNet 输出的热力图会先被解码为候选球点。系统根据热力图峰值、候选连通域、分数阈值、画面范围和时间连续性选择当前帧球点。
+
+后处理阶段会处理以下情况：
+
+- 低置信度候选。
+- 暂时丢失的球点。
+- 静态热点误检。
+- 顶部出画或边缘误检。
+- 轨迹断裂后的短时补点。
+
+最终输出统一的逐帧轨迹结果，包括球点坐标、可见状态和置信度。
+
+### 4. 球场建模与平面投影
+
+球场检测模块基于图像中的白线和球场几何约束估计标准羽毛球场模板在画面中的位置。单应性矩阵建立后，系统可以在图像坐标和实际球场坐标之间转换。
+
+这个步骤把视频分析从“画面像素”提升到“场地空间”，使球员移动距离、击球区域和热力图统计更有实际意义。
+
+### 5. 姿态稳定与球员定位
+
+姿态推理会产生人体框和关键点，但单帧检测可能存在抖动、漏检或身份交换。系统会结合球场位置、检测框、历史轨迹和缺失帧容忍策略稳定上方球员和下方球员的姿态结果。
+
+稳定后的姿态用于：
+
+- 计算球员脚下锚点。
+- 投影到标准球场平面。
+- 累计球员移动距离。
+- 为动作识别准备人体时序特征。
+
+### 6. 轨迹事件检测
+
+系统在滤波后的球轨迹上检测事件。击球点通常对应速度方向变化、局部极值或加速度变化；落点和出画事件则更多依赖速度突变、可见性下降和轨迹边界位置。
+
+事件检测采用规则式方法，便于调试和解释。每个事件会带有事件类型、帧号、时间戳、球点坐标、触发规则和置信度。
+
+### 7. 动作识别与回合汇总
+
+当识别到击球事件后，系统会在该事件附近收集一段时序数据，包括人体关键点、球点轨迹和球员场地位置。可选的 BST 模型会对该片段进行动作分类。
+
+随后，系统把球轨迹、姿态、球场投影、轨迹事件和动作预测结果合并为回合统计数据，用于界面展示或导出分析。
+
+### 8. 可视化与数据输出
+
+系统将分析结果以多种形式呈现：
+
+- 视频画面叠加球轨迹、球点、人体骨架和球场线。
+- 标准球场视图显示球员位置、球点投影和热力图。
+- 表格展示击球事件、动作分类和回合数据。
+- JSON、CSV、NPY 或 JSONL 等结构化数据用于后续分析。
+- 调试日志记录轨迹滤波和逐帧事件信息，便于排查误检和漏检。
+
+## 技术栈
+
+WFBARNet 主要使用 Python 实现，桌面端基于 PyQt6，视觉处理依赖 OpenCV，深度学习推理基于 PyTorch。系统可接入 Ultralytics YOLO pose、MMPose、TensorRT 和 BST 时序动作识别模型。数据处理和导出使用 NumPy、CSV、JSON 等常见格式。
+
+## 适用场景与边界
+
+系统适合用于羽毛球训练视频分析、算法实验、轨迹和姿态数据采集、回合统计和可视化复盘。它不是完整的裁判系统，也不保证在所有拍摄条件下稳定输出准确结果。
+
+分析效果通常受以下因素影响：
+
+- 视频清晰度和帧率。
+- 摄像机角度和抖动情况。
+- 球场线是否完整可见。
+- 羽毛球是否严重模糊、遮挡或出画。
+- 球员姿态是否被遮挡。
+- 模型权重与视频场景是否匹配。
+- CPU/GPU 性能是否满足实时推理需求。
+
+因此，WFBARNet 更适合作为可解释、可调试、可扩展的本地分析系统，而不是开箱即用的通用比赛判罚工具。

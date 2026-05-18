@@ -60,6 +60,20 @@ class TrajectoryEventCandidateGeneratorTest(unittest.TestCase):
 
         self.assertFalse(any(item["event_type"] == "hit" for item in candidates))
 
+    def test_does_not_use_missing_gap_as_landing_speed_drop(self) -> None:
+        generator = TrajectoryEventCandidateGenerator()
+
+        candidates = generator.generate(
+            [1071.6, 1070.1, -1.0, -1.0, 1072.9, 1074.0, 1074.2, 1075.5, 1075.9],
+            [161.4, 161.5, -1.0, -1.0, 161.9, 162.9, 166.4, 169.0, 173.0],
+            [1, 1, 0, 0, 1, 1, 1, 1, 1],
+            img_width=1920,
+            img_height=1080,
+            include_trajectory_end=False,
+        )
+
+        self.assertFalse(any(item["event_type"] == "landing" for item in candidates))
+
     def test_detects_landing_from_speed_step(self) -> None:
         generator = TrajectoryEventCandidateGenerator()
 
@@ -74,8 +88,78 @@ class TrajectoryEventCandidateGeneratorTest(unittest.TestCase):
         self.assertEqual(landing["rule"], "speed_step")
         self.assertEqual(landing["frame"], 4)
 
-    def test_marks_edge_visibility_drop_as_out_of_frame(self) -> None:
+    def test_does_not_mark_top_apex_low_speed_as_landing(self) -> None:
         generator = TrajectoryEventCandidateGenerator()
+
+        candidates = generator.generate(
+            [0.0, 8.0, 16.0, 18.0, 19.0, 20.0, 21.0, 22.0],
+            [20.0] * 8,
+            [1] * 8,
+            img_width=500,
+            img_height=200,
+            include_trajectory_end=True,
+        )
+
+        self.assertFalse(any(item["event_type"] == "landing" for item in candidates))
+
+    def test_does_not_mark_upper_court_upward_slowdown_as_landing(self) -> None:
+        generator = TrajectoryEventCandidateGenerator()
+
+        candidates = generator.generate(
+            [1071.5, 1071.7, 1071.8, 1071.8, 1071.6, 1071.2, 1071.6, 1070.1],
+            [200.6, 186.9, 173.7, 168.9, 164.3, 161.9, 161.4, 161.5],
+            [1] * 8,
+            img_width=1920,
+            img_height=1080,
+            include_trajectory_end=False,
+        )
+
+        self.assertFalse(any(item["event_type"] == "landing" for item in candidates))
+
+    def test_does_not_mark_slow_high_clear_apex_as_landing(self) -> None:
+        generator = TrajectoryEventCandidateGenerator()
+
+        candidates = generator.generate(
+            [909.5, 906.1, 903.0, 899.8, 897.7, 894.3, 892.5, 891.0, 889.2, 888.5],
+            [308.9, 305.1, 299.8, 298.6, 296.7, 295.1, 297.1, 297.9, 299.0, 301.1],
+            [1] * 10,
+            img_width=1920,
+            img_height=1080,
+            include_trajectory_end=False,
+        )
+
+        self.assertFalse(any(item["event_type"] == "landing" for item in candidates))
+
+    def test_detects_trajectory_end_only_from_low_speed_tail(self) -> None:
+        generator = TrajectoryEventCandidateGenerator()
+
+        candidates = generator.generate(
+            [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            [100.0] * 7,
+            [1] * 7,
+            include_trajectory_end=True,
+        )
+
+        landing = next(item for item in candidates if item.get("rule") == "trajectory_end")
+        self.assertEqual(landing["event_type"], "landing")
+        self.assertEqual(landing["features"]["landing_type"], "tail_low_speed_start")
+
+    def test_does_not_use_high_speed_tail_as_trajectory_end_landing(self) -> None:
+        generator = TrajectoryEventCandidateGenerator()
+
+        candidates = generator.generate(
+            [0.0, 30.0, 60.0, 90.0, 120.0, -1.0, -1.0, -1.0, -1.0, -1.0],
+            [100.0, 100.0, 100.0, 100.0, 100.0, -1.0, -1.0, -1.0, -1.0, -1.0],
+            [1, 1, 1, 1, 1, 0, 0, 0, 0, 0],
+            include_trajectory_end=True,
+        )
+
+        self.assertFalse(any(item.get("rule") == "trajectory_end" for item in candidates))
+
+    def test_marks_edge_visibility_drop_as_out_of_frame(self) -> None:
+        generator = TrajectoryEventCandidateGenerator(
+            TrajectoryEventDetectorConfig(visibility_drop_missing_frames=3)
+        )
 
         candidates = generator.generate(
             [100.0, 80.0, 50.0, 10.0, -1.0, -1.0, -1.0],
@@ -119,7 +203,9 @@ class TrajectoryEventCandidateGeneratorTest(unittest.TestCase):
         self.assertFalse(any(item["event_type"] == "out_of_frame" for item in candidates))
 
     def test_marks_confirmed_top_exit_as_out_of_frame(self) -> None:
-        generator = TrajectoryEventCandidateGenerator()
+        generator = TrajectoryEventCandidateGenerator(
+            TrajectoryEventDetectorConfig(visibility_drop_missing_frames=3)
+        )
 
         candidates = generator.generate(
             [100.0, 100.0, 100.0, 100.0, -1.0, -1.0, -1.0],
@@ -133,6 +219,67 @@ class TrajectoryEventCandidateGeneratorTest(unittest.TestCase):
         self.assertTrue(candidates)
         self.assertEqual(candidates[0]["event_type"], "out_of_frame")
         self.assertEqual(candidates[0]["rule"], "visibility_drop_edge")
+
+    def test_marks_generic_visibility_drop_as_tracking_loss_not_landing(self) -> None:
+        generator = TrajectoryEventCandidateGenerator(
+            TrajectoryEventDetectorConfig(visibility_drop_missing_frames=3)
+        )
+
+        candidates = generator.generate(
+            [100.0, 120.0, 140.0, 160.0, -1.0, -1.0, -1.0],
+            [200.0, 230.0, 260.0, 300.0, -1.0, -1.0, -1.0],
+            [1, 1, 1, 1, 0, 0, 0],
+            img_width=500,
+            img_height=500,
+            include_trajectory_end=False,
+        )
+
+        self.assertTrue(candidates)
+        self.assertEqual(candidates[0]["event_type"], "out_of_frame")
+        self.assertEqual(candidates[0]["rule"], "visibility_drop_tracking_lost")
+
+    def test_marks_long_tracking_loss_as_rally_end_landing(self) -> None:
+        generator = TrajectoryEventCandidateGenerator(
+            TrajectoryEventDetectorConfig(
+                visibility_drop_missing_frames=3,
+                rally_end_missing_frames=5,
+            )
+        )
+
+        candidates = generator.generate(
+            [100.0, 110.0, 120.0, 130.0, -1.0, -1.0, -1.0, -1.0, -1.0],
+            [400.0, 390.0, 380.0, 370.0, -1.0, -1.0, -1.0, -1.0, -1.0],
+            [1, 1, 1, 1, 0, 0, 0, 0, 0],
+            img_width=500,
+            img_height=500,
+            include_trajectory_end=False,
+        )
+
+        self.assertTrue(candidates)
+        self.assertEqual(candidates[0]["event_type"], "landing")
+        self.assertEqual(candidates[0]["rule"], "tracking_lost_rally_end")
+
+    def test_does_not_mark_tracking_loss_from_jump_outlier_as_rally_end(self) -> None:
+        generator = TrajectoryEventCandidateGenerator(
+            TrajectoryEventDetectorConfig(
+                visibility_drop_missing_frames=3,
+                rally_end_missing_frames=5,
+                tracking_lost_end_max_speed=120.0,
+            )
+        )
+
+        candidates = generator.generate(
+            [900.0, 910.0, 920.0, 1826.0, -1.0, -1.0, -1.0, -1.0, -1.0],
+            [450.0, 452.0, 449.0, 966.0, -1.0, -1.0, -1.0, -1.0, -1.0],
+            [1, 1, 1, 1, 0, 0, 0, 0, 0],
+            img_width=1920,
+            img_height=1080,
+            include_trajectory_end=False,
+        )
+
+        self.assertTrue(candidates)
+        self.assertEqual(candidates[0]["event_type"], "out_of_frame")
+        self.assertEqual(candidates[0]["rule"], "visibility_drop_tracking_lost")
 
     def test_does_not_emit_hit_from_smooth_acceleration_peaks_only(self) -> None:
         generator = TrajectoryEventCandidateGenerator()
@@ -299,6 +446,70 @@ class RealtimeTrajectoryEventDetectorTest(unittest.TestCase):
         assert event is not None
         self.assertEqual(event["event_type"], "hit")
         self.assertEqual(event["frame_id"], 3)
+
+    def test_short_tracking_dropout_does_not_end_rally(self) -> None:
+        detector = RealtimeTrajectoryEventDetector(TrajectoryEventDetectorConfig(fps=60.0))
+        ending_events = []
+        samples = [
+            (0, 0.0, 100.0, 1),
+            (1, 20.0, 100.0, 1),
+            (2, 40.0, 100.0, 1),
+            (3, 60.0, 100.0, 1),
+            (4, 80.0, 100.0, 1),
+            (5, -1.0, -1.0, 0),
+            (6, -1.0, -1.0, 0),
+            (7, -1.0, -1.0, 0),
+            (8, 100.0, 100.0, 1),
+            (9, 120.0, 100.0, 1),
+            (10, 140.0, 100.0, 1),
+        ]
+
+        for frame_id, x, y, visible in samples:
+            event = detector.update(
+                _frame(frame_id, x, y, visible=visible),
+                timestamp_ms=int(round(frame_id * 1000 / 60)),
+                frame_shape=(300, 500, 3),
+            )
+            if isinstance(event, dict) and event.get("event_type") in {"landing", "out_of_frame"}:
+                ending_events.append(event)
+
+        self.assertEqual(ending_events, [])
+
+    def test_emits_delayed_rally_end_after_long_tracking_loss(self) -> None:
+        detector = RealtimeTrajectoryEventDetector(
+            TrajectoryEventDetectorConfig(
+                fps=60.0,
+                visibility_drop_missing_frames=3,
+                rally_end_missing_frames=5,
+            )
+        )
+        event = None
+        samples = [
+            (0, 100.0, 400.0, 1),
+            (1, 110.0, 390.0, 1),
+            (2, 120.0, 380.0, 1),
+            (3, 130.0, 370.0, 1),
+            (4, -1.0, -1.0, 0),
+            (5, -1.0, -1.0, 0),
+            (6, -1.0, -1.0, 0),
+            (7, -1.0, -1.0, 0),
+            (8, -1.0, -1.0, 0),
+            (9, -1.0, -1.0, 0),
+        ]
+
+        for frame_id, x, y, visible in samples:
+            current = detector.update(
+                _frame(frame_id, x, y, visible=visible),
+                timestamp_ms=int(round(frame_id * 1000 / 60)),
+                frame_shape=(500, 500, 3),
+            )
+            if isinstance(current, dict) and current.get("event_type") == "landing":
+                event = current
+
+        self.assertIsNotNone(event)
+        assert event is not None
+        self.assertEqual(event["frame_id"], 3)
+        self.assertEqual(event["rule"], "tracking_lost_rally_end")
 
 
 if __name__ == "__main__":

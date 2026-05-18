@@ -206,6 +206,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--snap-response-threshold", type=float, default=0.18)
     parser.add_argument("--max-refine-corner-shift-ratio", type=float, default=0.045)
     parser.add_argument("--green-side-offset-px", type=float, default=14.0)
+    parser.add_argument("--min-outer-width-ratio", type=float, default=0.08)
+    parser.add_argument("--min-outer-depth-ratio", type=float, default=0.08)
+    parser.add_argument("--min-outer-width-depth-ratio", type=float, default=0.18)
+    parser.add_argument("--max-outer-width-depth-ratio", type=float, default=5.5)
+    parser.add_argument("--max-transverse-angle-deg", type=float, default=35.0)
     parser.add_argument("--no-corner-snap", dest="corner_snap", action="store_false", help="Disable local white-line intersection snapping for the four editable corners.")
     parser.set_defaults(corner_snap=True)
     parser.add_argument("--corner-snap-radius", type=int, default=80, help="Search radius in pixels around each editable corner.")
@@ -941,6 +946,40 @@ def quad_geometry_score(points: np.ndarray, frame_shape: tuple[int, ...]) -> flo
     return 0.55 * area_score + 0.45 * side_score
 
 
+def court_shape_sanity_score(points: np.ndarray, frame_shape: tuple[int, ...], args: argparse.Namespace) -> float:
+    if points.shape != (4, 2) or not np.isfinite(points).all() or not is_convex_quad(points):
+        return 0.0
+    height, width = frame_shape[:2]
+    diag = max(1.0, float(np.hypot(width, height)))
+    edge_lengths = np.linalg.norm(points - np.roll(points, -1, axis=0), axis=1)
+    top_width, right_depth, bottom_width, left_depth = [float(value) for value in edge_lengths]
+    court_width_px = max(top_width, bottom_width)
+    court_depth_px = max(left_depth, right_depth)
+    if court_width_px <= 1.0 or court_depth_px <= 1.0:
+        return 0.0
+
+    min_width_ratio = max(0.01, float(getattr(args, "min_outer_width_ratio", 0.08)))
+    min_depth_ratio = max(0.01, float(getattr(args, "min_outer_depth_ratio", 0.08)))
+    min_aspect = max(0.01, float(getattr(args, "min_outer_width_depth_ratio", 0.18)))
+    max_aspect = max(min_aspect + 0.01, float(getattr(args, "max_outer_width_depth_ratio", 5.5)))
+
+    width_score = float(np.clip(court_width_px / (diag * min_width_ratio), 0.0, 1.0))
+    depth_score = float(np.clip(court_depth_px / (diag * min_depth_ratio), 0.0, 1.0))
+    aspect = court_width_px / court_depth_px
+    if aspect < min_aspect:
+        aspect_score = float(np.clip(aspect / min_aspect, 0.0, 1.0))
+    elif aspect > max_aspect:
+        aspect_score = float(np.clip(max_aspect / aspect, 0.0, 1.0))
+    else:
+        aspect_score = 1.0
+    return min(width_score, depth_score, aspect_score)
+
+
+def is_likely_transverse_family(theta_deg: float, args: argparse.Namespace) -> bool:
+    max_angle = float(np.clip(getattr(args, "max_transverse_angle_deg", 35.0), 0.0, 90.0))
+    return angle_distance_deg(float(theta_deg), 0.0) <= max_angle
+
+
 def projected_line_mask_support(mask: np.ndarray, line_points: np.ndarray, sample_step: float = 12.0, radius: int = 2) -> float:
     if len(line_points) < 2 or not np.isfinite(line_points).all():
         return 0.0
@@ -1177,6 +1216,7 @@ def score_court_detection(
     effective_line_score = 0.55 * line_count_score + 0.45 * merged_count_score
     keypoint_score = float(np.clip(detection.supported_keypoints / max(1.0, float(len(detection.keypoint_names))), 0.0, 1.0))
     quad_score = quad_geometry_score(detection.corners, frame_shape)
+    shape_score = court_shape_sanity_score(detection.corners, frame_shape, args)
     bounds_score = quad_bounds_score(detection.corners, frame_shape)
     length_score = float(np.clip(detection.avg_line_length / max(1.0, diag * 0.18), 0.0, 1.0))
     structure_score = structure_score_from_homography(detection.corners, detection.court_to_image_h, frame_shape)
@@ -1197,6 +1237,7 @@ def score_court_detection(
         "line_count": effective_line_score,
         "keypoints": keypoint_score,
         "quad": quad_score,
+        "shape": shape_score,
         "bounds": bounds_score,
         "stability": stability_score,
         "line_length": length_score,
@@ -1221,7 +1262,10 @@ def score_court_detection(
     )
 
     reason = "ok"
-    if bounds_score < 0.75:
+    if shape_score < 0.55:
+        confidence *= 0.25
+        reason = "implausible court shape"
+    elif bounds_score <= 0.75:
         confidence *= 0.5
         reason = "corner out of bounds"
     elif quad_score < 0.25:
@@ -1389,7 +1433,9 @@ def find_best_court_quad_three_family(
 
     height, width = mask.shape[:2]
     best: CourtLineDetection | None = None
-    for cross_index, (_, cross_lines) in enumerate(merged_clusters):
+    for cross_index, (cross_angle, cross_lines) in enumerate(merged_clusters):
+        if not is_likely_transverse_family(cross_angle, args):
+            continue
         if len(cross_lines) < 2:
             continue
         side_indices = [index for index in range(len(merged_clusters)) if index != cross_index]
@@ -1622,8 +1668,9 @@ def update_tracking_state(
     elif candidate.confidence >= float(args.medium_conf):
         alpha = float(args.smooth_alpha_medium)
         if state.current is None:
-            state.current = blend_detections(None, candidate, 1.0, frame_id, timestamp, "medium startup")
-            state.last_update_type = "medium startup"
+            state.last_update_type = "rejected"
+            state.rejected_count += 1
+            return
         else:
             state.current = blend_detections(state.current, candidate, alpha, frame_id, timestamp, "medium smooth")
             state.last_update_type = "medium smooth"

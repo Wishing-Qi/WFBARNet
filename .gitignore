@@ -91,6 +91,7 @@ runs/
 *.log.*
 
 # Local IDE and shell caches
+.codex_deps/
 .vscode/
 .idea/
 Microsoft/

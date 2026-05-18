@@ -53,6 +53,12 @@ USER_CONFIG = RuntimeConfig(
 )
 
 
+def launch_pyqt_app() -> int:
+    from apps.pyqt6.main import main as pyqt_main
+
+    return pyqt_main()
+
+
 def build_runner(config: RuntimeConfig) -> UnifiedRunner:
     device = resolve_device(config.device)
     pose_branch = PoseBranch(
@@ -134,11 +140,7 @@ def build_track_runner(config: RuntimeConfig) -> TrackVideoRunner:
     )
 
 
-def main() -> None:
-    config = USER_CONFIG
-    if not config.source:
-        raise ValueError("Please set USER_CONFIG.source in main.py before running.")
-
+def run_pipeline(config: RuntimeConfig) -> None:
     if config.pipeline == "track_realtime":
         runner = build_track_realtime_runner(config)
         runner.run(
@@ -183,5 +185,14 @@ def main() -> None:
     )
 
 
+def main() -> int:
+    config = USER_CONFIG
+    if not config.source:
+        return launch_pyqt_app()
+
+    run_pipeline(config)
+    return 0
+
+
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

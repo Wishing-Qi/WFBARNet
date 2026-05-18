@@ -615,6 +615,9 @@ class MainWindow(QMainWindow):
     modelSwitchesChanged = pyqtSignal(bool, bool)
     debugCsvChanged = pyqtSignal(bool)
     courtRedetectRequested = pyqtSignal()
+    batchFolderBrowseRequested = pyqtSignal()
+    batchRallySelectionChanged = pyqtSignal(str)
+    batchExportRequested = pyqtSignal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -761,8 +764,13 @@ class MainWindow(QMainWindow):
         self.btn_camera_mode.setObjectName("btnCameraMode")
         self.btn_camera_mode.setCheckable(True)
 
+        self.btn_batch_mode = QPushButton("批量推理")
+        self.btn_batch_mode.setObjectName("btnBatchMode")
+        self.btn_batch_mode.setCheckable(True)
+
         preview_header.addWidget(self.btn_preview_mode)
         preview_header.addWidget(self.btn_camera_mode)
+        preview_header.addWidget(self.btn_batch_mode)
         preview_header.addStretch(1)
 
         self.progress_bar = QProgressBar(preview_panel)
@@ -804,9 +812,33 @@ class MainWindow(QMainWindow):
         self.btn_refresh_cameras.setObjectName("btnRefreshCameras")
         self.btn_refresh_cameras.setVisible(False)
 
+        self.btn_select_batch_folder = QPushButton("选择文件夹")
+        self.btn_select_batch_folder.setObjectName("btnSelectBatchFolder")
+        self.btn_select_batch_folder.setVisible(False)
+        self.batch_folder_edit = QLineEdit()
+        self.batch_folder_edit.setObjectName("videoPathEdit")
+        self.batch_folder_edit.setReadOnly(True)
+        self.batch_folder_edit.setPlaceholderText("批量视频文件夹")
+        self.batch_folder_edit.setVisible(False)
+        self.batch_video_combo = QComboBox()
+        self.batch_video_combo.setObjectName("cameraDeviceCombo")
+        self.batch_video_combo.setMinimumWidth(180)
+        self.batch_video_combo.setVisible(False)
+        self.btn_export_batch = QPushButton("导出数据")
+        self.btn_export_batch.setObjectName("btnExportBatch")
+        self.btn_export_batch.setEnabled(False)
+        self.btn_export_batch.setVisible(False)
+
         controls_layout.addWidget(self.camera_device_combo)
         controls_layout.addWidget(self.btn_refresh_cameras)
+        controls_layout.addWidget(self.btn_select_batch_folder)
+        controls_layout.addWidget(self.batch_folder_edit, stretch=1)
+        controls_layout.addWidget(self.batch_video_combo)
+        controls_layout.addWidget(self.btn_export_batch)
         controls_layout.addWidget(self.video_player.btn_force_stop)
+        self.btn_select_batch_folder.clicked.connect(self.batchFolderBrowseRequested.emit)
+        self.batch_video_combo.currentIndexChanged.connect(self._emit_batch_rally_selection)
+        self.btn_export_batch.clicked.connect(self.batchExportRequested.emit)
 
         self.video_timeline = VideoTimelineWidget()
         timeline_bar = QWidget()
@@ -842,6 +874,7 @@ class MainWindow(QMainWindow):
         self.tabs.setTabShape(QTabWidget.TabShape.Rounded)
 
         self._build_overview_tab()
+        self._build_data_tab()
         self._build_stats_tab()
         self._build_pose_tab()
         self._build_settings_tab()
@@ -860,7 +893,7 @@ class MainWindow(QMainWindow):
         metrics_grid.setHorizontalSpacing(12)
         metrics_grid.setVerticalSpacing(12)
         card1, self.lbl_realtime_fps = self._create_metric_card("实时帧数", "0.0 FPS")
-        card2, self.lbl_avg_conf = self._create_metric_card("平均置信度", "0.0%")
+        card2, self.lbl_rally_state = self._create_rally_state_card()
         card3, self.lbl_valid_pose = self._create_metric_card("推理 FPS", "0.0 FPS")
         card4, self.lbl_valid_track = self._create_metric_card("击球次数", "0")
         for index, card in enumerate((card1, card2, card3, card4)):
@@ -895,6 +928,67 @@ class MainWindow(QMainWindow):
         overview_layout.addLayout(section_header)
         overview_layout.addWidget(self.table_actions)
         self.tabs.addTab(tab_overview, "概览")
+
+    def _build_data_tab(self) -> None:
+        tab_data = QWidget()
+        data_layout = QVBoxLayout(tab_data)
+        data_layout.setContentsMargins(12, 12, 12, 12)
+        data_layout.setSpacing(12)
+
+        section_header = QHBoxLayout()
+        section_title = QLabel("回合数据")
+        section_title.setObjectName("sectionTitle")
+        section_note = QLabel("实时推理 / 批量推理共用")
+        section_note.setObjectName("sectionNote")
+        section_header.addWidget(section_title)
+        section_header.addStretch(1)
+        section_header.addWidget(section_note)
+
+        self.data_subtabs = QTabWidget()
+        self.data_subtabs.setObjectName("mainTabs")
+
+        summary_page = QWidget()
+        summary_layout = QVBoxLayout(summary_page)
+        summary_layout.setContentsMargins(0, 0, 0, 0)
+        self.table_data_summary = QTableWidget(0, 4)
+        self.table_data_summary.setObjectName("actionTable")
+        self.table_data_summary.setHorizontalHeaderLabels(["指标", "上方球员", "下方球员", "全回合"])
+        self.table_data_summary.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.table_data_summary.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table_data_summary.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table_data_summary.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.table_data_summary.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table_data_summary.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table_data_summary.setAlternatingRowColors(True)
+        self.table_data_summary.verticalHeader().setVisible(False)
+        self.table_data_summary.setShowGrid(True)
+        summary_layout.addWidget(self.table_data_summary)
+
+        details_page = QWidget()
+        details_layout = QVBoxLayout(details_page)
+        details_layout.setContentsMargins(0, 0, 0, 0)
+        self.table_data_details = QTableWidget(0, 7)
+        self.table_data_details.setObjectName("actionTable")
+        self.table_data_details.setHorizontalHeaderLabels(["时间", "类型", "球员", "区域", "动作", "置信度", "场地坐标"])
+        self.table_data_details.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.table_data_details.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.table_data_details.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.table_data_details.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.table_data_details.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        self.table_data_details.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        self.table_data_details.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
+        self.table_data_details.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table_data_details.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table_data_details.setAlternatingRowColors(True)
+        self.table_data_details.verticalHeader().setVisible(False)
+        self.table_data_details.setShowGrid(True)
+        details_layout.addWidget(self.table_data_details)
+
+        self.data_subtabs.addTab(summary_page, "汇总")
+        self.data_subtabs.addTab(details_page, "详情")
+        data_layout.addLayout(section_header)
+        data_layout.addWidget(self.data_subtabs, stretch=1)
+        self.tabs.addTab(tab_data, "数据")
 
     def _build_stats_tab(self) -> None:
         tab_stats = QWidget()
@@ -1076,6 +1170,22 @@ class MainWindow(QMainWindow):
         layout.addWidget(value_lbl)
         return container, value_lbl
 
+    def _create_rally_state_card(self) -> tuple[QFrame, QLabel]:
+        container = QFrame()
+        container.setObjectName("metricCard")
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(6)
+
+        title_lbl = QLabel("回合状态")
+        title_lbl.setObjectName("metricTitle")
+        value_lbl = QLabel("未开始")
+        value_lbl.setObjectName("metricValue")
+
+        layout.addWidget(title_lbl)
+        layout.addWidget(value_lbl)
+        return container, value_lbl
+
     def _refresh_widget(self, widget: QWidget) -> None:
         widget.style().unpolish(widget)
         widget.style().polish(widget)
@@ -1089,14 +1199,22 @@ class MainWindow(QMainWindow):
 
     def set_input_mode(self, mode: str) -> None:
         is_camera = mode == "camera"
-        self.btn_preview_mode.setChecked(not is_camera)
+        is_batch = mode == "batch"
+        self.btn_preview_mode.setChecked(not is_camera and not is_batch)
         self.btn_camera_mode.setChecked(is_camera)
-        self.video_player.btn_select_video.setVisible(not is_camera)
-        self.video_player.path_edit.setVisible(not is_camera)
+        self.btn_batch_mode.setChecked(is_batch)
+        self.video_player.btn_select_video.setVisible(not is_camera and not is_batch)
+        self.video_player.path_edit.setVisible(not is_camera and not is_batch)
         self.camera_device_combo.setVisible(is_camera)
         self.btn_refresh_cameras.setVisible(is_camera)
-        self.video_timeline.setVisible(not is_camera)
+        self.btn_select_batch_folder.setVisible(is_batch)
+        self.batch_folder_edit.setVisible(is_batch)
+        self.batch_video_combo.setVisible(is_batch)
+        self.btn_export_batch.setVisible(is_batch)
+        self.video_timeline.setVisible(not is_camera and not is_batch)
         self.btn_analyze.setText("开始推理" if is_camera else "开始分析")
+        if is_batch:
+            self.btn_analyze.setText("开始批量分析")
         if is_camera:
             self.video_player.path_edit.clear()
 
@@ -1111,6 +1229,37 @@ class MainWindow(QMainWindow):
         if self.camera_device_combo.count() <= 0:
             return None
         return int(self.camera_device_combo.currentData())
+
+    def set_batch_folder_path(self, path: str) -> None:
+        self.batch_folder_edit.setText(path)
+        self.batch_folder_edit.setToolTip(path)
+
+    def set_batch_rally_options(self, records: list[dict[str, object]], selected_id: str | None = None) -> None:
+        current_id = selected_id or self.selected_batch_rally_id()
+        self.batch_video_combo.blockSignals(True)
+        self.batch_video_combo.clear()
+        for record in records:
+            rally_id = str(record.get("id", record.get("video_path", "")))
+            label = str(record.get("video_name", rally_id))
+            if not rally_id:
+                continue
+            self.batch_video_combo.addItem(label, rally_id)
+        if current_id:
+            index = self.batch_video_combo.findData(current_id)
+            if index >= 0:
+                self.batch_video_combo.setCurrentIndex(index)
+        self.batch_video_combo.blockSignals(False)
+
+    def selected_batch_rally_id(self) -> str:
+        if self.batch_video_combo.count() <= 0:
+            return ""
+        return str(self.batch_video_combo.currentData() or "")
+
+    def set_batch_export_enabled(self, enabled: bool) -> None:
+        self.btn_export_batch.setEnabled(bool(enabled))
+
+    def _emit_batch_rally_selection(self, _index: int = -1) -> None:
+        self.batchRallySelectionChanged.emit(self.selected_batch_rally_id())
 
     def set_model_settings(self, pose_model_path: str, track_model_path: str) -> None:
         self.pose_model_edit.setText(pose_model_path)
@@ -1207,6 +1356,145 @@ class MainWindow(QMainWindow):
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setFormat("%p%")
 
+    def set_rally_data(self, record: object | None) -> None:
+        if not isinstance(record, dict):
+            self.table_data_summary.setRowCount(0)
+            self.table_data_details.setRowCount(0)
+            self._set_rally_state(None)
+            return
+        summary = record.get("summary", {})
+        details = record.get("details", {})
+        self._set_rally_state(summary.get("rally_state") if isinstance(summary, dict) else None)
+        self._populate_rally_summary(summary if isinstance(summary, dict) else {})
+        self._populate_rally_details(details if isinstance(details, dict) else {})
+
+    def _populate_rally_summary(self, summary: dict[str, object]) -> None:
+        players = summary.get("players", {})
+        if not isinstance(players, dict):
+            players = {}
+        top = players.get("top", {}) if isinstance(players.get("top", {}), dict) else {}
+        bottom = players.get("bottom", {}) if isinstance(players.get("bottom", {}), dict) else {}
+        reliability = summary.get("data_reliability", {})
+        if not isinstance(reliability, dict):
+            reliability = {}
+
+        rows = [
+            ("累计跑动距离", self._fmt_m(top.get("distance_m")), self._fmt_m(bottom.get("distance_m")), self._fmt_m(self._num(top.get("distance_m")) + self._num(bottom.get("distance_m")))),
+            ("平均速度", self._fmt_speed(top.get("avg_speed_mps")), self._fmt_speed(bottom.get("avg_speed_mps")), ""),
+            ("最大速度", self._fmt_speed(top.get("max_speed_mps")), self._fmt_speed(bottom.get("max_speed_mps")), ""),
+            ("急停次数", str(int(self._num(top.get("stop_count")))), str(int(self._num(bottom.get("stop_count")))), ""),
+            ("启动次数", str(int(self._num(top.get("start_count")))), str(int(self._num(bottom.get("start_count")))), ""),
+            ("前场击球次数", str(self._zone_count(top, "front")), str(self._zone_count(bottom, "front")), ""),
+            ("中场击球次数", str(self._zone_count(top, "mid")), str(self._zone_count(bottom, "mid")), ""),
+            ("后场击球次数", str(self._zone_count(top, "back")), str(self._zone_count(bottom, "back")), ""),
+            ("该回合击球次数", str(int(self._num(top.get("hit_count")))), str(int(self._num(bottom.get("hit_count")))), str(int(self._num(summary.get("rally_hit_count"))))),
+            ("回合时长", "", "", self._fmt_seconds(summary.get("rally_duration_s", summary.get("duration_s")))),
+            ("回合状态", "", "", str(summary.get("rally_state", "") or "")),
+            ("平均击球间隔", "", "", self._fmt_seconds(self._num(summary.get("avg_hit_interval_ms")) / 1000.0)),
+            ("高强度移动次数", str(int(self._num(top.get("high_intensity_count")))), str(int(self._num(bottom.get("high_intensity_count")))), str(int(self._num(summary.get("high_intensity_count"))))),
+            ("最长连续移动", self._fmt_m(top.get("max_continuous_m")), self._fmt_m(bottom.get("max_continuous_m")), ""),
+            ("被动击球次数", str(int(self._num(top.get("passive_hit_count")))), str(int(self._num(bottom.get("passive_hit_count")))), ""),
+            ("运动强度评分", "", "", f"{self._num(summary.get('motion_intensity_score')):.1f}"),
+            ("球可见率", "", "", self._fmt_percent(reliability.get("ball_visible_rate"))),
+            ("姿态有效率", "", "", self._fmt_percent(reliability.get("pose_valid_rate"))),
+            ("球场有效率", "", "", self._fmt_percent(reliability.get("court_valid_rate"))),
+            ("平均球置信度", "", "", self._fmt_percent(reliability.get("avg_ball_confidence"))),
+        ]
+        self.table_data_summary.setRowCount(0)
+        for row_values in rows:
+            self._append_table_row(self.table_data_summary, row_values)
+
+    def _populate_rally_details(self, details: dict[str, object]) -> None:
+        hits = details.get("hits", [])
+        if not isinstance(hits, list):
+            hits = []
+        self.table_data_details.setRowCount(0)
+        for hit in hits:
+            if not isinstance(hit, dict):
+                continue
+            confidence = self._num(hit.get("confidence")) or self._num(hit.get("event_confidence"))
+            court_xy = hit.get("court_xy")
+            coord_text = ""
+            if isinstance(court_xy, (list, tuple)) and len(court_xy) >= 2:
+                coord_text = f"{self._num(court_xy[0]):.1f}, {self._num(court_xy[1]):.1f} cm"
+            self._append_table_row(
+                self.table_data_details,
+                (
+                    self._fmt_time_ms(hit.get("timestamp_ms")),
+                    "BST动作" if hit.get("source") == "bst" else "球轨候选",
+                    str(hit.get("player_label", "")),
+                    self._zone_label(str(hit.get("zone", ""))),
+                    str(hit.get("stroke", "")),
+                    self._fmt_percent(confidence),
+                    coord_text,
+                ),
+            )
+
+    def _append_table_row(self, table: QTableWidget, values: tuple[object, ...]) -> None:
+        row = table.rowCount()
+        table.insertRow(row)
+        for column, value in enumerate(values):
+            item = QTableWidgetItem(str(value))
+            if column > 0:
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            table.setItem(row, column, item)
+
+    def _set_rally_state(self, state: object | None) -> None:
+        state_text = str(state).strip()
+        mapping = {
+            "回合中": "回合中",
+            "active": "回合中",
+            "ongoing": "回合中",
+            "in_rally": "回合中",
+            "rally_active": "回合中",
+            "回合结束": "回合结束",
+            "ended": "回合结束",
+            "finished": "回合结束",
+            "complete": "回合结束",
+            "rally_ended": "回合结束",
+        }
+        self.lbl_rally_state.setText(mapping.get(state_text, "未开始"))
+
+    def _zone_count(self, player: dict[str, object], zone: str) -> int:
+        zones = player.get("zone_hits", {})
+        if not isinstance(zones, dict):
+            return 0
+        return int(self._num(zones.get(zone)))
+
+    @staticmethod
+    def _zone_label(zone: str) -> str:
+        return {"front": "前场", "mid": "中场", "back": "后场"}.get(zone, zone)
+
+    @staticmethod
+    def _num(value: object) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        if number != number or number in (float("inf"), float("-inf")):
+            return 0.0
+        return number
+
+    def _fmt_m(self, value: object) -> str:
+        return f"{self._num(value):.2f} m"
+
+    def _fmt_speed(self, value: object) -> str:
+        return f"{self._num(value):.2f} m/s"
+
+    def _fmt_percent(self, value: object) -> str:
+        return f"{self._num(value) * 100:.1f}%"
+
+    def _fmt_seconds(self, value: object) -> str:
+        return f"{self._num(value):.2f} s"
+
+    def _fmt_time_ms(self, value: object) -> str:
+        total_seconds = max(0.0, self._num(value) / 1000.0)
+        minutes = int(total_seconds // 60)
+        seconds = total_seconds - minutes * 60
+        if minutes > 0:
+            return f"{minutes:d}:{seconds:05.2f}"
+        return f"{seconds:.2f}s"
+
     def add_action_row(self, time_range: str, label: str, conf: float, detail: str) -> None:
         row = 0
         self.table_actions.insertRow(row)
@@ -1237,9 +1525,10 @@ class MainWindow(QMainWindow):
         self.court_widget.clear_player_heatmap()
         self.set_player_distances(None)
         self.lbl_realtime_fps.setText("0.0 FPS")
-        self.lbl_avg_conf.setText("0.0%")
+        self.lbl_rally_state.setText("未开始")
         self.lbl_valid_pose.setText("0.0 FPS")
         self.lbl_valid_track.setText("0")
+        self.set_rally_data(None)
 
     def stroke_total_count(self) -> int:
         return self.stroke_pie_chart.total_count()

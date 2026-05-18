@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import csv
 from datetime import datetime
+import json
 import os
 from pathlib import Path
 import sys
@@ -22,12 +23,14 @@ from PyQt6.QtWidgets import QApplication, QFileDialog
 from apps.pyqt6.utils.style import apply_theme, discover_themes
 from apps.pyqt6.utils.theme_transition import start_theme_ripple_transition
 from apps.pyqt6.views.main_window_refined import MainWindow
+from src.court import create_court_line_detector
 from src.models.bst_runtime import build_bst_model
 from src.models.bst_stroke_runtime import BSTStrokeRecognizer
 from src.models.pose_branch import PoseBranch
 from src.models.track_branch import TrackBranch
 from src.postprocess.player_distance import PlayerDistanceAccumulator
 from src.postprocess.pose import CourtPoseTargetTracker
+from src.postprocess.rally_stats import RallyStatsAccumulator
 from src.postprocess.tracknet_v3_filter import create_tracknet_v3_ball_track_filter
 from src.postprocess.trajectory_events import RealtimeTrajectoryEventDetector
 from src.utils.exporters import TRACK_DEBUG_FIELDS, frame_result_log_record, write_frame_log_jsonl
@@ -212,6 +215,28 @@ def project_player_points_to_court(
             if person_index is not None:
                 projected[person_index] = court_xy
     return projected
+
+
+def project_ball_to_court(
+    track: TrackResult,
+    court_prediction: object | None,
+) -> tuple[float, float] | None:
+    if not bool(getattr(track, "visible", 0)):
+        return None
+    h = extract_image_to_court_h(court_prediction)
+    if h is None:
+        return None
+    ball_xy = getattr(track, "ball_xy", None)
+    if not isinstance(ball_xy, (list, tuple)) or len(ball_xy) < 2:
+        return None
+    try:
+        x = float(ball_xy[0])
+        y = float(ball_xy[1])
+    except (TypeError, ValueError):
+        return None
+    if not _is_finite(x) or not _is_finite(y):
+        return None
+    return project_image_point(h, (x, y))
 
 
 def pose_person_bboxes(poses: list[PersonPoseResult]) -> list[tuple[float, float, float, float]]:
@@ -504,6 +529,11 @@ class TrackNetPlaybackWorker(QThread):
             motion_prediction_scale=0.55,
         )
         distance_accumulator = PlayerDistanceAccumulator()
+        rally_stats = RallyStatsAccumulator(
+            rally_id=self._video_path,
+            rally_name=Path(self._video_path).name,
+            fps=fps,
+        )
         trail_renderer = TrackTrailRenderer(fps=fps, history_seconds=0.5)
         event_detector = RealtimeTrajectoryEventDetector(fps=fps)
         frame_height, frame_width = current_frame.shape[:2]
@@ -622,6 +652,7 @@ class TrackNetPlaybackWorker(QThread):
                         frame_result_log_record(
                             frame_result,
                             timestamp_ms=current_ms,
+                            court_prediction=court_prediction,
                             hit_event=hit_event,
                             trajectory_event=trajectory_event,
                             landing_event=landing_event,
@@ -658,6 +689,21 @@ class TrackNetPlaybackWorker(QThread):
                     else:
                         distance_accumulator.reset_tracking_points()
                         player_distances_m = distance_accumulator.totals_m()
+                    ball_projection = project_ball_to_court(track, court_prediction)
+                    rally_stats.update_frame(
+                        timestamp_ms=current_ms,
+                        player_points=player_points,
+                        ball_visible=bool(track.visible),
+                        ball_xy=track.ball_xy,
+                        ball_score=float(track.score),
+                        court_valid=bool(prediction_value(court_prediction, "valid", False))
+                        if court_prediction is not None
+                        else False,
+                    )
+                    rally_stats.add_trajectory_event(trajectory_event, ball_court_xy=ball_projection)
+                    for prediction in pending_bst_predictions:
+                        rally_stats.add_bst_prediction(prediction)
+                    rally_record = rally_stats.export_record()
                     write_track_debug_row(debug_writer, track_debug)
                     track_filter.debug_records.clear()
                     if should_emit:
@@ -679,9 +725,10 @@ class TrackNetPlaybackWorker(QThread):
                             "processed_frames": processed_frames,
                             "infer_fps": ema_infer_fps,
                             "court": court_prediction.to_dict() if court_prediction is not None else None,
-                            "ball_projection": None,
+                            "ball_projection": ball_projection,
                             "player_projections": player_projections,
                             "player_distances_m": player_distances_m,
+                            "rally_record": rally_record,
                             "track_debug": track_debug,
                             "trajectory_event": trajectory_event,
                             "landing_event": landing_event,
@@ -749,6 +796,7 @@ class TrackNetPlaybackWorker(QThread):
                 "pose_frames": pose_frames,
                 "avg_score": (score_sum / processed_frames) if processed_frames else 0.0,
                 "player_distances_m": distance_accumulator.totals_m(),
+                "rally_record": rally_stats.export_record(),
             }
         )
 
@@ -860,6 +908,11 @@ class CameraInferenceWorker(QThread):
             motion_prediction_scale=0.55,
         )
         distance_accumulator = PlayerDistanceAccumulator()
+        rally_stats = RallyStatsAccumulator(
+            rally_id=f"camera_{self._camera_index}",
+            rally_name=f"摄像头 {self._camera_index}",
+            fps=fps,
+        )
         trail_renderer = TrackTrailRenderer(fps=fps, history_seconds=0.5)
         event_detector = RealtimeTrajectoryEventDetector(fps=fps)
         frame_height, frame_width = first_frame.shape[:2]
@@ -951,6 +1004,17 @@ class CameraInferenceWorker(QThread):
                     else:
                         distance_accumulator.reset_tracking_points()
                         player_distances_m = distance_accumulator.totals_m()
+                    ball_projection = project_ball_to_court(track, court_prediction)
+                    rally_stats.update_frame(
+                        timestamp_ms=position_ms,
+                        player_points=player_points,
+                        ball_visible=bool(track.visible),
+                        ball_xy=track.ball_xy,
+                        ball_score=float(track.score),
+                        court_valid=bool(prediction_value(court_prediction, "valid", False))
+                        if court_prediction is not None
+                        else False,
+                    )
                     write_track_debug_row(debug_writer, track_debug)
                     track_filter.debug_records.clear()
                     frame_result = FrameResult(frame_id=current_frame_id, pose=last_pose, track=track)
@@ -989,6 +1053,7 @@ class CameraInferenceWorker(QThread):
                         frame_result_log_record(
                             frame_result,
                             timestamp_ms=position_ms,
+                            court_prediction=court_prediction,
                             hit_event=hit_event,
                             trajectory_event=trajectory_event,
                             landing_event=landing_event,
@@ -1009,6 +1074,11 @@ class CameraInferenceWorker(QThread):
                             if bst_prediction is not None:
                                 pending_bst_predictions.append(bst_prediction)
 
+                    rally_stats.add_trajectory_event(trajectory_event, ball_court_xy=ball_projection)
+                    for prediction in pending_bst_predictions:
+                        rally_stats.add_bst_prediction(prediction)
+                    rally_record = rally_stats.export_record()
+
                     if position_ms >= next_display_ms:
                         payload = {
                             "image": image,
@@ -1028,9 +1098,10 @@ class CameraInferenceWorker(QThread):
                             "processed_frames": processed_frames,
                             "infer_fps": ema_infer_fps,
                             "court": court_prediction.to_dict() if court_prediction is not None else None,
-                            "ball_projection": None,
+                            "ball_projection": ball_projection,
                             "player_projections": player_projections,
                             "player_distances_m": player_distances_m,
+                            "rally_record": rally_record,
                             "track_debug": track_debug,
                             "trajectory_event": trajectory_event,
                             "landing_event": landing_event,
@@ -1064,8 +1135,354 @@ class CameraInferenceWorker(QThread):
                 "pose_frames": pose_frames,
                 "avg_score": (score_sum / processed_frames) if processed_frames else 0.0,
                 "player_distances_m": distance_accumulator.totals_m(),
+                "rally_record": rally_stats.export_record(),
             }
         )
+
+
+class BatchInferenceWorker(QThread):
+    progressChanged = pyqtSignal(object)
+    rallyFinished = pyqtSignal(object)
+    batchFinished = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    VIDEO_SUFFIXES = {".mp4", ".avi", ".mov", ".mkv", ".wmv", ".m4v"}
+
+    def __init__(
+        self,
+        folder_path: str,
+        track_branch: TrackBranch,
+        pose_branch: PoseBranch,
+        *,
+        pose_stride: int = 3,
+        track_enabled: bool = True,
+        pose_enabled: bool = True,
+        bst_model: Any | None = None,
+        bst_device: str = "cpu",
+    ) -> None:
+        super().__init__()
+        self._folder_path = folder_path
+        self._track_branch = track_branch
+        self._pose_branch = pose_branch
+        self._pose_stride = max(1, pose_stride)
+        self._track_enabled = track_enabled
+        self._pose_enabled = pose_enabled
+        self._bst_model = bst_model
+        self._bst_device = bst_device
+        self._stop_requested = False
+
+    def request_stop(self) -> None:
+        self._stop_requested = True
+
+    def run(self) -> None:
+        try:
+            self._run_impl()
+        except Exception as exc:
+            traceback.print_exc()
+            self.failed.emit(f"批量推理失败: {exc}")
+
+    def _run_impl(self) -> None:
+        folder = Path(self._folder_path)
+        video_paths = self._video_paths(folder)
+        if not video_paths:
+            self.failed.emit(f"文件夹中没有可分析的视频: {folder}")
+            return
+
+        completed = 0
+        failed_count = 0
+        total = len(video_paths)
+        for index, video_path in enumerate(video_paths):
+            if self._stop_requested:
+                break
+            self.progressChanged.emit(
+                {
+                    "phase": "start_video",
+                    "index": index,
+                    "total": total,
+                    "video_name": video_path.name,
+                    "overall_progress": index / max(1, total),
+                }
+            )
+            try:
+                record = self._process_video(video_path, index=index, total=total)
+            except Exception as exc:
+                failed_count += 1
+                record = {
+                    "id": str(video_path),
+                    "video_name": video_path.name,
+                    "video_path": str(video_path),
+                    "error": str(exc),
+                    "summary": {},
+                    "details": {"hits": [], "players": {}},
+                }
+            if record:
+                completed += int(not record.get("error"))
+                self.rallyFinished.emit(record)
+
+        self.batchFinished.emit(
+            {
+                "stopped": self._stop_requested,
+                "total": total,
+                "completed": completed,
+                "failed": failed_count,
+            }
+        )
+
+    def _video_paths(self, folder: Path) -> list[Path]:
+        if not folder.is_dir():
+            return []
+        return sorted(
+            (
+                path
+                for path in folder.iterdir()
+                if path.is_file() and path.suffix.lower() in self.VIDEO_SUFFIXES
+            ),
+            key=lambda path: path.name.lower(),
+        )
+
+    def _create_bst_recognizer(self, width: int, height: int, fps: float) -> BSTStrokeRecognizer | None:
+        if self._bst_model is None or not self._track_enabled or not self._pose_enabled:
+            return None
+        return BSTStrokeRecognizer(
+            self._bst_model,
+            self._bst_device,
+            max(1, int(width)),
+            max(1, int(height)),
+            fps=fps,
+        )
+
+    def _read_frame(
+        self,
+        cap: cv2.VideoCapture,
+        fallback_index: int,
+        fps: float,
+    ) -> tuple[bool, Any, int]:
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            return False, None, 0
+        position_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
+        if position_ms is None or position_ms <= 0:
+            position_ms = (fallback_index * 1000.0) / fps if fps > 0 else 0.0
+        return True, frame, int(round(position_ms))
+
+    def _process_video(self, video_path: Path, *, index: int, total: int) -> dict[str, Any]:
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            raise RuntimeError(f"无法打开视频: {video_path}")
+
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        if fps <= 0:
+            fps = 25.0
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        duration_ms = int(round((frame_count / fps) * 1000)) if frame_count > 0 else 0
+        frame_interval_ms = int(round(1000.0 / fps)) if fps > 0 else 40
+
+        ok, current_frame, current_ms = self._read_frame(cap, 0, fps)
+        if not ok:
+            cap.release()
+            raise RuntimeError("无法读取第一帧视频")
+
+        ok, next_frame, next_ms = self._read_frame(cap, 1, fps)
+        if not ok:
+            next_frame = current_frame.copy()
+            next_ms = current_ms + frame_interval_ms
+
+        prev_frame = current_frame.copy()
+        processed_frames = 0
+        visible_frames = 0
+        pose_frames = 0
+        score_sum = 0.0
+        final_pass = False
+        last_pose = []
+        track_filter = create_tracknet_v3_ball_track_filter(fps=fps, debug_enabled=False)
+        pose_tracker = CourtPoseTargetTracker(
+            max_missing_frames=max(self._pose_stride, int(round(fps * POSE_MAX_MISSING_SECONDS))),
+            court_margin=POSE_COURT_MARGIN_CM,
+            detection_smoothing=0.78,
+            velocity_smoothing=0.50,
+            court_required=True,
+            predict_missing_motion=True,
+            motion_prediction_scale=0.55,
+        )
+        distance_accumulator = PlayerDistanceAccumulator()
+        event_detector = RealtimeTrajectoryEventDetector(fps=fps)
+        court_detector = create_court_line_detector()
+        frame_height, frame_width = current_frame.shape[:2]
+        bst_recognizer = self._create_bst_recognizer(frame_width, frame_height, fps)
+        rally_stats = RallyStatsAccumulator(
+            rally_id=str(video_path),
+            rally_name=video_path.name,
+            fps=fps,
+        )
+        pending_bst_errors: list[str] = []
+        parallel_inference = (
+            self._track_enabled
+            and self._pose_enabled
+            and getattr(self._track_branch, "backend_name", "") == "tensorrt"
+        )
+        progress_every = max(1, int(round(fps)))
+
+        try:
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="wfb-batch-infer") as infer_executor:
+                while not self._stop_requested:
+                    frame_id = int(round((current_ms / 1000.0) * fps)) if fps > 0 else processed_frames
+                    court_prediction = court_detector.predict(
+                        current_frame,
+                        frame_id,
+                        current_ms,
+                        force=processed_frames == 0,
+                    )
+                    pose_due = self._pose_enabled and processed_frames % self._pose_stride == 0
+                    run_parallel = parallel_inference and pose_due
+                    if run_parallel:
+                        track_future = infer_executor.submit(
+                            self._track_branch.infer_candidate_results,
+                            [prev_frame, current_frame, next_frame],
+                        )
+                        pose_future = infer_executor.submit(
+                            self._pose_branch.infer,
+                            current_frame,
+                            court_prediction=court_prediction,
+                        )
+                        candidates = track_future.result()
+                        detections = pose_future.result()
+                    else:
+                        candidates = (
+                            self._track_branch.infer_candidate_results([prev_frame, current_frame, next_frame])
+                            if self._track_enabled
+                            else []
+                        )
+                        detections = (
+                            self._pose_branch.infer(current_frame, court_prediction=court_prediction)
+                            if pose_due
+                            else []
+                        )
+
+                    if self._pose_enabled:
+                        last_pose = pose_tracker.update(
+                            detections,
+                            court_prediction,
+                            frame_shape=current_frame.shape,
+                        )
+                        pose_frames += int(bool(last_pose))
+                    else:
+                        pose_tracker.reset()
+                        last_pose = []
+
+                    if self._track_enabled:
+                        track = track_filter.update_candidates(
+                            candidates,
+                            frame_shape=current_frame.shape,
+                            court_prediction=court_prediction,
+                            person_bboxes=pose_person_bboxes(last_pose),
+                        )
+                    else:
+                        track = TrackResult(ball_xy=[-1.0, -1.0], visible=0, score=0.0)
+
+                    processed_frames += 1
+                    visible_frames += int(bool(track.visible))
+                    score_sum += float(track.score)
+                    player_points = project_player_points_to_court(last_pose, court_prediction)
+                    if player_points:
+                        distance_accumulator.update(player_points)
+                    else:
+                        distance_accumulator.reset_tracking_points()
+                    ball_projection = project_ball_to_court(track, court_prediction)
+                    rally_stats.update_frame(
+                        timestamp_ms=current_ms,
+                        player_points=player_points,
+                        ball_visible=bool(track.visible),
+                        ball_xy=track.ball_xy,
+                        ball_score=float(track.score),
+                        court_valid=bool(prediction_value(court_prediction, "valid", False)),
+                    )
+
+                    frame_result = FrameResult(frame_id=frame_id, pose=last_pose, track=track)
+                    trajectory_event = event_detector.update(
+                        frame_result,
+                        timestamp_ms=current_ms,
+                        frame_shape=current_frame.shape,
+                    )
+                    hit_event = (
+                        trajectory_event
+                        if isinstance(trajectory_event, dict) and trajectory_event.get("event_type") == "hit"
+                        else None
+                    )
+                    rally_stats.add_trajectory_event(trajectory_event, ball_court_xy=ball_projection)
+
+                    if bst_recognizer is not None:
+                        try:
+                            bst_prediction = bst_recognizer.update(
+                                frame_result,
+                                hit_event=hit_event,
+                                court_prediction=court_prediction,
+                            )
+                        except Exception as exc:
+                            pending_bst_errors.append(str(exc))
+                            bst_recognizer = None
+                        else:
+                            if bst_prediction is not None:
+                                rally_stats.add_bst_prediction(bst_prediction)
+
+                    if processed_frames % progress_every == 0 or final_pass:
+                        local_progress = (
+                            min(1.0, processed_frames / frame_count)
+                            if frame_count > 0
+                            else 0.0
+                        )
+                        self.progressChanged.emit(
+                            {
+                                "phase": "video_progress",
+                                "index": index,
+                                "total": total,
+                                "video_name": video_path.name,
+                                "local_progress": local_progress,
+                                "overall_progress": (index + local_progress) / max(1, total),
+                                "processed_frames": processed_frames,
+                            }
+                        )
+
+                    if final_pass:
+                        break
+
+                    prev_frame = current_frame
+                    current_frame = next_frame
+                    current_ms = next_ms
+                    ok, incoming_frame, incoming_ms = self._read_frame(cap, processed_frames + 1, fps)
+                    if ok:
+                        next_frame = incoming_frame
+                        next_ms = incoming_ms
+                    else:
+                        next_frame = current_frame.copy()
+                        next_ms = current_ms + frame_interval_ms
+                        final_pass = True
+        finally:
+            cap.release()
+
+        record = rally_stats.export_record()
+        summary = record["summary"]
+        summary.update(
+            {
+                "video_name": video_path.name,
+                "video_path": str(video_path),
+                "duration_ms": max(int(summary.get("duration_ms", 0)), duration_ms),
+                "processed_frames": processed_frames,
+                "visible_frames": visible_frames,
+                "pose_frames": pose_frames,
+                "avg_score": (score_sum / processed_frames) if processed_frames else 0.0,
+                "player_distances_m": distance_accumulator.totals_m(),
+                "bst_errors": pending_bst_errors,
+            }
+        )
+        record.update(
+            {
+                "id": str(video_path),
+                "video_name": video_path.name,
+                "video_path": str(video_path),
+                "summary": summary,
+            }
+        )
+        return record
 
 
 class MainController:
@@ -1087,12 +1504,16 @@ class MainController:
         self._theme_dirs = discover_themes()
         self._active_theme_name = self._resolve_initial_theme_name()
         self._selected_video_path: str | None = None
+        self._selected_batch_folder: str | None = None
         self._video_meta: dict[str, Any] = {}
         self._input_mode = "video"
         self._camera_devices: list[tuple[int, str]] = []
         self._probe_worker: VideoProbeWorker | None = None
         self._playback_worker: TrackNetPlaybackWorker | None = None
         self._camera_worker: CameraInferenceWorker | None = None
+        self._batch_worker: BatchInferenceWorker | None = None
+        self._batch_results: dict[str, dict[str, Any]] = {}
+        self._batch_order: list[str] = []
         self._pending_seek_ms: int | None = None
         self._last_display_frame_time: float | None = None
         self._last_metrics_update_time: float | None = None
@@ -1133,7 +1554,7 @@ class MainController:
 
     def _request_court_prediction(self) -> None:
         if self._court_service is None:
-            self.view.append_log("[Court] OpenCV court line detector is unavailable.")
+            self.view.append_log("[Court] ShuttleCourt court detector is unavailable.")
             return
         if not self._is_inference_running():
             self.view.append_log("[Court] 请先开始视频播放或摄像头推理，再重新预测球场线。")
@@ -1155,13 +1576,13 @@ class MainController:
             self._last_court_log_frame = frame_id
             confidence = float(payload.get("confidence", 0.0))
             detect_ms = float(payload.get("detect_ms", 0.0))
-            self.view.append_log(f"[Court] OpenCV court lines updated | frame {frame_id} | conf {confidence:.2f} | {detect_ms:.0f} ms")
+            self.view.append_log(f"[Court] ShuttleCourt court updated | frame {frame_id} | conf {confidence:.2f} | {detect_ms:.0f} ms")
         elif not valid and self._last_court_log_frame < 0:
             self._last_court_log_frame = frame_id
-            self.view.append_log("[Court] OpenCV court line detector is running; waiting for a valid court.")
+            self.view.append_log("[Court] ShuttleCourt court detector is running; waiting for a valid court.")
 
     def _on_court_detection_failed(self, message: str) -> None:
-        self.view.append_log(f"[Court] OpenCV court line detector failed: {message}")
+        self.view.append_log(f"[Court] ShuttleCourt court detector failed: {message}")
 
     def _load_model_path(self, key: str, default_path: str) -> str:
         raw_value = self._settings.value(key, default_path)
@@ -1281,11 +1702,15 @@ class MainController:
         self.view.btn_reset.clicked.connect(self.handle_reset)
         self.view.btn_preview_mode.clicked.connect(lambda: self.handle_input_mode("video"))
         self.view.btn_camera_mode.clicked.connect(lambda: self.handle_input_mode("camera"))
+        self.view.btn_batch_mode.clicked.connect(lambda: self.handle_input_mode("batch"))
         self.view.btn_refresh_cameras.clicked.connect(lambda: self._refresh_camera_devices(log=True))
         self.view.camera_device_combo.currentIndexChanged.connect(lambda _index: self._set_idle_state())
         self.view.video_player.selectRequested.connect(self.handle_upload)
         self.view.video_player.forceStopRequested.connect(self.handle_force_stop)
         self.view.video_timeline.seekRequested.connect(self.handle_seek)
+        self.view.batchFolderBrowseRequested.connect(self.handle_browse_batch_folder)
+        self.view.batchRallySelectionChanged.connect(self.handle_batch_rally_selection)
+        self.view.batchExportRequested.connect(self.handle_export_batch_results)
         self.view._style_menu.triggered.connect(self._on_style_action_triggered)
         self.view.poseModelBrowseRequested.connect(self.handle_browse_pose_model)
         self.view.trackModelBrowseRequested.connect(self.handle_browse_track_model)
@@ -1298,11 +1723,21 @@ class MainController:
     def _set_idle_state(self) -> None:
         has_video = self._selected_video_path is not None
         has_camera = self.view.selected_camera_device() is not None
-        self.view.btn_analyze.setEnabled(has_video if self._input_mode == "video" else has_camera)
+        has_batch_folder = self._selected_batch_folder is not None
+        if self._input_mode == "camera":
+            can_analyze = has_camera
+        elif self._input_mode == "batch":
+            can_analyze = has_batch_folder
+        else:
+            can_analyze = has_video
+        self.view.btn_analyze.setEnabled(can_analyze)
         self.view.btn_reset.setEnabled(True)
         self.view.video_player.btn_select_video.setEnabled(self._input_mode == "video")
         self.view.btn_refresh_cameras.setEnabled(self._input_mode == "camera")
         self.view.camera_device_combo.setEnabled(self._input_mode == "camera")
+        self.view.btn_select_batch_folder.setEnabled(self._input_mode == "batch")
+        self.view.batch_video_combo.setEnabled(self._input_mode == "batch" and bool(self._batch_order))
+        self.view.btn_export_batch.setEnabled(self._input_mode == "batch" and bool(self._batch_results))
         self.view.video_player.btn_force_stop.setEnabled(has_video if self._input_mode == "video" else False)
         self.view.btn_redetect_court.setEnabled(False)
         self.view.video_timeline.set_interactive(self._input_mode == "video")
@@ -1315,8 +1750,11 @@ class MainController:
         self.view.video_player.btn_select_video.setEnabled(False)
         self.view.btn_refresh_cameras.setEnabled(False)
         self.view.camera_device_combo.setEnabled(False)
+        self.view.btn_select_batch_folder.setEnabled(False)
+        self.view.batch_video_combo.setEnabled(False)
+        self.view.btn_export_batch.setEnabled(False)
         self.view.video_player.btn_force_stop.setEnabled(True)
-        self.view.btn_redetect_court.setEnabled(self._court_service is not None)
+        self.view.btn_redetect_court.setEnabled(self._court_service is not None and self._input_mode != "batch")
         self.view.video_timeline.set_interactive(False)
         self.view.set_model_settings_enabled(False)
         self.view.set_status_state("loading")
@@ -1360,7 +1798,7 @@ class MainController:
         return True
 
     def handle_input_mode(self, mode: str) -> None:
-        if mode not in {"video", "camera"}:
+        if mode not in {"video", "camera", "batch"}:
             return
 
         self._stop_workers(clear_pending_seek=True)
@@ -1375,6 +1813,13 @@ class MainController:
             self.view.append_log("[模式] 已切换到摄像头实时推理")
             if not self._camera_devices:
                 self._refresh_camera_devices(log=True)
+        elif mode == "batch":
+            self.view.clear_video()
+            self.view.video_player.set_live_source("批量推理（无画面高速分析）")
+            if self._selected_batch_folder:
+                self.view.set_batch_folder_path(self._selected_batch_folder)
+            self.view.set_batch_rally_options(self._batch_records_for_view(), self.view.selected_batch_rally_id())
+            self.view.append_log("[模式] 已切换到批量推理")
         else:
             self.view.append_log("[模式] 已切换到视频预览")
             if self._selected_video_path:
@@ -1412,6 +1857,7 @@ class MainController:
         return bool(
             (self._playback_worker is not None and self._playback_worker.isRunning())
             or (self._camera_worker is not None and self._camera_worker.isRunning())
+            or (self._batch_worker is not None and self._batch_worker.isRunning())
         )
 
     def _model_dialog_start_dir(self, current_path: str, default_path: str) -> str:
@@ -1561,6 +2007,67 @@ class MainController:
         self.view.append_log(f"[信息] 正在加载预览: {Path(file_path).name}")
         self._start_probe(file_path, 0)
 
+    def handle_browse_batch_folder(self) -> None:
+        if self._is_inference_running():
+            self.view.append_log("[批量推理] 请先停止当前推理任务，再选择文件夹。")
+            return
+
+        start_dir = str(Path(__file__).resolve().parents[3] / "videos")
+        folder_path = QFileDialog.getExistingDirectory(
+            self.view,
+            "选择批量视频文件夹",
+            self._selected_batch_folder or start_dir,
+        )
+        if not folder_path:
+            self.view.append_log("[批量推理] 文件夹选择已取消。")
+            return
+
+        self._selected_batch_folder = folder_path
+        self._batch_results.clear()
+        self._batch_order.clear()
+        options = self._batch_video_options(folder_path)
+        self.view.set_batch_folder_path(folder_path)
+        self.view.set_batch_rally_options(options)
+        self.view.set_batch_export_enabled(False)
+        self.view.set_rally_data(None)
+        self.view.append_log(f"[批量推理] 已选择文件夹: {folder_path} | 视频 {len(options)} 个")
+        self._set_idle_state()
+
+    def handle_batch_rally_selection(self, rally_id: str) -> None:
+        if not rally_id:
+            self.view.set_rally_data(None)
+            return
+        record = self._batch_results.get(rally_id)
+        if record is not None:
+            self.view.set_rally_data(record)
+
+    def _batch_video_options(self, folder_path: str) -> list[dict[str, Any]]:
+        folder = Path(folder_path)
+        if not folder.is_dir():
+            return []
+        return [
+            {
+                "id": str(path),
+                "video_name": path.name,
+                "video_path": str(path),
+            }
+            for path in sorted(
+                (
+                    item
+                    for item in folder.iterdir()
+                    if item.is_file() and item.suffix.lower() in BatchInferenceWorker.VIDEO_SUFFIXES
+                ),
+                key=lambda item: item.name.lower(),
+            )
+        ]
+
+    def _batch_records_for_view(self) -> list[dict[str, Any]]:
+        if self._batch_order:
+            return [self._batch_results[item_id] for item_id in self._batch_order if item_id in self._batch_results]
+        if self._selected_batch_folder:
+            return self._batch_video_options(self._selected_batch_folder)
+        return []
+
     def _start_probe(self, video_path: str, position_ms: int) -> None:
         if self._probe_worker is not None and self._probe_worker.isRunning():
             self._probe_worker.quit()
@@ -1615,6 +2122,9 @@ class MainController:
         if self._input_mode == "camera":
             self._start_camera_inference()
             return
+        if self._input_mode == "batch":
+            self._start_batch_inference()
+            return
 
         if not self._selected_video_path:
             self.view.append_log("[警告] 开始分析前请先选择视频。")
@@ -1623,6 +2133,58 @@ class MainController:
         self._pending_seek_ms = None
         start_ms = int(self._video_meta.get("position_ms", 0)) if self._video_meta else 0
         self._start_playback(start_ms=start_ms, request_court_prediction=True)
+
+    def _start_batch_inference(self) -> None:
+        if not self._selected_batch_folder:
+            self.view.append_log("[批量推理] 开始分析前请先选择视频文件夹。")
+            return
+
+        options = self._batch_video_options(self._selected_batch_folder)
+        if not options:
+            self.view.append_log("[批量推理] 该文件夹中没有可分析的视频。")
+            return
+
+        self._stop_workers(clear_pending_seek=True)
+        if (
+            self._playback_worker is not None
+            or self._camera_worker is not None
+            or self._batch_worker is not None
+        ):
+            self.view.append_log("[信息] 正在等待上一项推理任务结束...")
+            return
+
+        self._batch_results.clear()
+        self._batch_order.clear()
+        self._reset_metrics()
+        self.view.set_batch_rally_options(options)
+        self.view.set_batch_export_enabled(False)
+        self.view.video_player.clear_video()
+        self.view.video_player.set_live_source("批量推理（无画面高速分析）")
+        self.view.set_progress_busy(False)
+        self.view.update_progress(0)
+        self._set_running_state()
+        self.view.append_log(
+            f"[批量推理] 开始分析 {len(options)} 个回合 | "
+            f"球轨迹 {'启用' if self._track_model_enabled else '关闭'} | "
+            f"骨骼 {'启用' if self._pose_model_enabled else '关闭'}"
+        )
+
+        self._batch_worker = BatchInferenceWorker(
+            self._selected_batch_folder,
+            self._track_branch,
+            self._pose_branch,
+            pose_stride=POSE_INFERENCE_STRIDE,
+            track_enabled=self._track_model_enabled,
+            pose_enabled=self._pose_model_enabled,
+            bst_model=self._bst_model,
+            bst_device=self._bst_device,
+        )
+        self._batch_worker.progressChanged.connect(self._on_batch_progress)
+        self._batch_worker.rallyFinished.connect(self._on_batch_rally_finished)
+        self._batch_worker.batchFinished.connect(self._on_batch_finished)
+        self._batch_worker.failed.connect(self._on_batch_failed)
+        self._batch_worker.finished.connect(lambda worker=self._batch_worker: self._release_batch_worker(worker))
+        self._batch_worker.start()
 
     def _start_camera_inference(self) -> None:
         camera_index = self.view.selected_camera_device()
@@ -1735,6 +2297,7 @@ class MainController:
         self._log_track_debug_event(payload.get("track_debug"))
         self._append_trajectory_event(payload.get("trajectory_event"))
         self._append_bst_predictions(payload)
+        self.view.set_rally_data(payload.get("rally_record"))
 
         progress = max(0, min(int(float(payload.get("progress", 0.0)) * 100), 100))
         self.view.update_progress(progress)
@@ -1742,7 +2305,6 @@ class MainController:
             return
 
         person_count = int(payload.get("person_count", 0))
-        avg_score = float(payload.get("avg_score", 0.0))
         infer_fps = float(payload.get("infer_fps", 0.0))
         track = payload.get("track", {})
         current_score = float(track.get("score", 0.0)) if isinstance(track, dict) else 0.0
@@ -1753,7 +2315,6 @@ class MainController:
 
         self.view.lbl_valid_pose.setText(f"{infer_fps:.1f} FPS")
         self.view.lbl_valid_track.setText(str(self.view.stroke_total_count()))
-        self.view.lbl_avg_conf.setText(f"{avg_score * 100:.1f}%")
         self.view.lbl_realtime_fps.setText(f"{self._display_fps_ema:.1f} FPS")
         self.view.status_label.setText(
             f"系统状态：TrackNet + YOLO26s-Pose 运行中 | 人数 {person_count} | Score {current_score:.2f}{court_text}"
@@ -1773,11 +2334,11 @@ class MainController:
         self._log_track_debug_event(payload.get("track_debug"))
         self._append_trajectory_event(payload.get("trajectory_event"))
         self._append_bst_predictions(payload)
+        self.view.set_rally_data(payload.get("rally_record"))
         if not self._should_update_metrics_text():
             return
 
         person_count = int(payload.get("person_count", 0))
-        avg_score = float(payload.get("avg_score", 0.0))
         track = payload.get("track", {})
         current_score = float(track.get("score", 0.0)) if isinstance(track, dict) else 0.0
         infer_fps = float(payload.get("infer_fps", 0.0))
@@ -1788,11 +2349,68 @@ class MainController:
 
         self.view.lbl_valid_pose.setText(f"{infer_fps:.1f} FPS")
         self.view.lbl_valid_track.setText(str(self.view.stroke_total_count()))
-        self.view.lbl_avg_conf.setText(f"{avg_score * 100:.1f}%")
         self.view.lbl_realtime_fps.setText(f"{self._display_fps_ema:.1f} FPS")
         self.view.status_label.setText(
             f"系统状态：摄像头 TrackNet + YOLO26s-Pose 推理中 | 人数 {person_count} | Score {current_score:.2f}{court_text}"
         )
+
+    def _on_batch_progress(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        progress = max(0, min(int(float(payload.get("overall_progress", 0.0)) * 100), 100))
+        video_name = str(payload.get("video_name", ""))
+        self.view.update_progress(progress)
+        if payload.get("phase") == "start_video":
+            index = int(payload.get("index", 0)) + 1
+            total = int(payload.get("total", 0))
+            self.view.append_log(f"[批量推理] {index}/{total} {video_name}")
+        self.view.status_label.setText(f"系统状态：批量推理中 | {progress}% | {video_name}")
+
+    def _on_batch_rally_finished(self, record: object) -> None:
+        if not isinstance(record, dict):
+            return
+        rally_id = str(record.get("id", record.get("video_path", "")))
+        if not rally_id:
+            return
+        if rally_id not in self._batch_order:
+            self._batch_order.append(rally_id)
+        self._batch_results[rally_id] = record
+        selected_id = self.view.selected_batch_rally_id() or rally_id
+        self.view.set_batch_rally_options(self._batch_records_for_view(), selected_id)
+        if selected_id == rally_id or len(self._batch_order) == 1:
+            self.view.set_rally_data(record)
+        if record.get("error"):
+            self.view.append_log(f"[批量推理] {record.get('video_name', rally_id)} 失败: {record.get('error')}")
+            return
+
+        summary = record.get("summary", {})
+        hit_count = int(summary.get("rally_hit_count", 0)) if isinstance(summary, dict) else 0
+        frame_count = int(summary.get("processed_frames", 0)) if isinstance(summary, dict) else 0
+        self.view.append_log(
+            f"[批量推理] 完成 {record.get('video_name', rally_id)} | 击球 {hit_count} 次 | 帧数 {frame_count}"
+        )
+
+    def _on_batch_finished(self, payload: object) -> None:
+        self.view.set_progress_busy(False)
+        stopped = bool(payload.get("stopped")) if isinstance(payload, dict) else False
+        total = int(payload.get("total", 0)) if isinstance(payload, dict) else len(self._batch_order)
+        completed = int(payload.get("completed", 0)) if isinstance(payload, dict) else len(self._batch_results)
+        failed = int(payload.get("failed", 0)) if isinstance(payload, dict) else 0
+        if stopped:
+            self.view.set_status_state("stopped")
+            self.view.append_log(f"[批量推理] 已停止 | 已完成 {completed}/{total}")
+        else:
+            self.view.set_status_state("success")
+            self.view.update_progress(100)
+            self.view.append_log(f"[批量推理] 全部完成 | 成功 {completed}/{total} | 失败 {failed}")
+        self.view.set_batch_export_enabled(bool(self._batch_results))
+        self._set_idle_state()
+
+    def _on_batch_failed(self, message: str) -> None:
+        self.view.set_progress_busy(False)
+        self.view.set_status_state("error")
+        self.view.append_log(f"[错误] {message}")
+        self._set_idle_state()
 
     def _append_bst_predictions(self, payload: dict[str, Any]) -> None:
         errors = payload.get("bst_errors", [])
@@ -1928,6 +2546,10 @@ class MainController:
         if self._playback_worker is worker:
             self._playback_worker = None
 
+    def _release_batch_worker(self, worker: object) -> None:
+        if self._batch_worker is worker:
+            self._batch_worker = None
+
     def _on_camera_finished(self, payload: object) -> None:
         self.view.set_progress_busy(False)
         stopped = bool(payload.get("stopped")) if isinstance(payload, dict) else False
@@ -1950,6 +2572,8 @@ class MainController:
                 self.view.append_log("[TrackNet] 摄像头实时推理结束。")
 
         self._append_player_distance_summary(payload)
+        if isinstance(payload, dict):
+            self.view.set_rally_data(payload.get("rally_record"))
         self._set_idle_state()
 
     def _on_camera_failed(self, message: str) -> None:
@@ -1981,6 +2605,8 @@ class MainController:
                 self.view.append_log("[TrackNet] 已完成。")
 
         self._append_player_distance_summary(payload)
+        if isinstance(payload, dict):
+            self.view.set_rally_data(payload.get("rally_record"))
         self._set_idle_state()
 
         if self._pending_seek_ms is not None and self._selected_video_path is not None:
@@ -2019,6 +2645,11 @@ class MainController:
             self._playback_worker.request_stop()
             return
 
+        if self._batch_worker is not None and self._batch_worker.isRunning():
+            self.view.append_log("[批量推理] 正在停止批量推理...")
+            self._batch_worker.request_stop()
+            return
+
         self.view.video_player.stop()
         self.view.set_status_state("stopped")
         self.view.append_log("[信息] 没有正在进行的播放任务。")
@@ -2027,9 +2658,15 @@ class MainController:
         self._stop_workers(clear_pending_seek=True)
         self._reset_court_detection()
         self._selected_video_path = None
+        self._selected_batch_folder = None
+        self._batch_results.clear()
+        self._batch_order.clear()
         self._video_meta = {}
         self.view.clear_video()
         self.view.set_input_mode(self._input_mode)
+        self.view.set_batch_folder_path("")
+        self.view.set_batch_rally_options([])
+        self.view.set_batch_export_enabled(False)
         self.view.log_console.clear()
         self._reset_metrics()
         self._set_idle_state()
@@ -2059,6 +2696,13 @@ class MainController:
                 self._camera_worker = None
         elif self._camera_worker is not None:
             self._camera_worker = None
+
+        if self._batch_worker is not None and self._batch_worker.isRunning():
+            self._batch_worker.request_stop()
+            if self._batch_worker.wait(1000):
+                self._batch_worker = None
+        elif self._batch_worker is not None:
+            self._batch_worker = None
         if self._court_service is not None:
             self._court_service.clear_pending()
         self.view.set_progress_busy(False)
@@ -2067,6 +2711,122 @@ class MainController:
         self._stop_workers(clear_pending_seek=True)
         if self._court_service is not None:
             self._court_service.stop()
+
+    def handle_export_batch_results(self) -> None:
+        if not self._batch_results:
+            self.view.append_log("[批量推理] 暂无可导出的回合数据。")
+            return
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_path = str(self._project_root / "outputs" / f"batch_rally_data_{timestamp}.json")
+        file_path, selected_filter = QFileDialog.getSaveFileName(
+            self.view,
+            "导出批量回合数据",
+            default_path,
+            "JSON 数据 (*.json);;CSV 汇总 (*.csv)",
+        )
+        if not file_path:
+            return
+
+        output_path = Path(file_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if output_path.suffix.lower() == ".csv" or "CSV" in selected_filter:
+            if output_path.suffix.lower() != ".csv":
+                output_path = output_path.with_suffix(".csv")
+            self._write_batch_summary_csv(output_path)
+        else:
+            if output_path.suffix.lower() != ".json":
+                output_path = output_path.with_suffix(".json")
+            payload = {
+                "exported_at": datetime.now().isoformat(timespec="seconds"),
+                "source_folder": self._selected_batch_folder,
+                "rallies": [
+                    self._batch_results[item_id]
+                    for item_id in self._batch_order
+                    if item_id in self._batch_results
+                ],
+            }
+            output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.view.append_log(f"[批量推理] 已导出数据: {output_path}")
+
+    def _write_batch_summary_csv(self, output_path: Path) -> None:
+        fieldnames = [
+            "video_name",
+            "duration_s",
+            "rally_hit_count",
+            "top_distance_m",
+            "bottom_distance_m",
+            "top_avg_speed_mps",
+            "bottom_avg_speed_mps",
+            "top_max_speed_mps",
+            "bottom_max_speed_mps",
+            "top_stop_count",
+            "bottom_stop_count",
+            "top_start_count",
+            "bottom_start_count",
+            "top_front_hits",
+            "top_mid_hits",
+            "top_back_hits",
+            "bottom_front_hits",
+            "bottom_mid_hits",
+            "bottom_back_hits",
+            "ball_visible_rate",
+            "pose_valid_rate",
+            "court_valid_rate",
+            "avg_ball_confidence",
+        ]
+        with output_path.open("w", newline="", encoding="utf-8-sig") as output_file:
+            writer = csv.DictWriter(output_file, fieldnames=fieldnames)
+            writer.writeheader()
+            for item_id in self._batch_order:
+                record = self._batch_results.get(item_id)
+                if not isinstance(record, dict):
+                    continue
+                writer.writerow(self._batch_summary_csv_row(record))
+
+    def _batch_summary_csv_row(self, record: dict[str, Any]) -> dict[str, Any]:
+        summary = record.get("summary", {})
+        if not isinstance(summary, dict):
+            summary = {}
+        players = summary.get("players", {})
+        if not isinstance(players, dict):
+            players = {}
+        top = players.get("top", {}) if isinstance(players.get("top", {}), dict) else {}
+        bottom = players.get("bottom", {}) if isinstance(players.get("bottom", {}), dict) else {}
+        reliability = summary.get("data_reliability", {})
+        if not isinstance(reliability, dict):
+            reliability = {}
+
+        def zone_value(player: dict[str, Any], zone: str) -> int:
+            zones = player.get("zone_hits", {})
+            if not isinstance(zones, dict):
+                return 0
+            return int(zones.get(zone, 0))
+
+        return {
+            "video_name": record.get("video_name", summary.get("video_name", "")),
+            "duration_s": self._safe_distance_value(summary.get("duration_s", 0.0)),
+            "rally_hit_count": int(summary.get("rally_hit_count", 0)),
+            "top_distance_m": self._safe_distance_value(top.get("distance_m", 0.0)),
+            "bottom_distance_m": self._safe_distance_value(bottom.get("distance_m", 0.0)),
+            "top_avg_speed_mps": self._safe_distance_value(top.get("avg_speed_mps", 0.0)),
+            "bottom_avg_speed_mps": self._safe_distance_value(bottom.get("avg_speed_mps", 0.0)),
+            "top_max_speed_mps": self._safe_distance_value(top.get("max_speed_mps", 0.0)),
+            "bottom_max_speed_mps": self._safe_distance_value(bottom.get("max_speed_mps", 0.0)),
+            "top_stop_count": int(top.get("stop_count", 0)),
+            "bottom_stop_count": int(bottom.get("stop_count", 0)),
+            "top_start_count": int(top.get("start_count", 0)),
+            "bottom_start_count": int(bottom.get("start_count", 0)),
+            "top_front_hits": zone_value(top, "front"),
+            "top_mid_hits": zone_value(top, "mid"),
+            "top_back_hits": zone_value(top, "back"),
+            "bottom_front_hits": zone_value(bottom, "front"),
+            "bottom_mid_hits": zone_value(bottom, "mid"),
+            "bottom_back_hits": zone_value(bottom, "back"),
+            "ball_visible_rate": self._safe_distance_value(reliability.get("ball_visible_rate", 0.0)),
+            "pose_valid_rate": self._safe_distance_value(reliability.get("pose_valid_rate", 0.0)),
+            "court_valid_rate": self._safe_distance_value(reliability.get("court_valid_rate", 0.0)),
+            "avg_ball_confidence": self._safe_distance_value(reliability.get("avg_ball_confidence", 0.0)),
+        }
 
     def _on_style_action_triggered(self, action) -> None:
         theme_name = str(action.data() or action.text()).strip()
