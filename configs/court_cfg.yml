@@ -1,0 +1,13 @@
+# Standard Badminton Court Parameters (Units: Meters)
+BadmintonCourt:
+  width: 6.1  # Width for doubles (standard)
+  length: 13.4 # Full length
+  
+  # Standard grid points coordinates (Meters)
+  # Origin (0,0) is bottom-left corner
+  target_points:
+    top_left: [0, 13.4]
+    top_right: [6.1, 13.4]
+    bottom_left: [0, 0]
+    bottom_right: [6.1, 0]
+    net_center: [3.05, 6.7]

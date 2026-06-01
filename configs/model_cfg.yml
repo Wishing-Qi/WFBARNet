@@ -1,0 +1,31 @@
+# YOLO-Pose Configuration
+YOLO:
+  weight_path: "deploy/weights/yolo26m-pose.pt"
+  conf_thresh: 0.25
+  iou_thresh: 0.45
+  use_tensorrt: false
+
+# TrackNetV3 Configuration
+TrackNetV3:
+  weight_path: "deploy/weights/tracknet_v3.pt"
+  input_frames: 3
+  heatmap_thresh: 0.5
+
+# ByteTrack Configuration
+ByteTrack:
+  track_thresh: 0.5
+  match_thresh: 0.8
+  buffer_size: 30
+
+# BST (Badminton Shot Transformer) Configuration
+BST:
+  weight_path: "deploy/weights/bst.pt"
+  window_size: 30
+  classes:
+    0: "Clear"
+    1: "Smash"
+    2: "Drop"
+    3: "Net Shot"
+    4: "Drive"
+    5: "Pick Up"
+    6: "Service"

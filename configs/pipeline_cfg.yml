@@ -1,0 +1,18 @@
+# Hardware Configuration
+Hardware:
+  device_id: 0
+  use_tensorrt: true
+  half_precision: true
+
+# Logging & Output Configuration
+Logging:
+  level: "INFO"
+  save_video: true
+  output_dir: "data/output"
+  log_dir: "logs"
+
+# Stream Source Configuration
+Stream:
+  source: "data/input/test_video.mp4" # Can be file path or RTSP URL
+  reconnect_interval: 5
+  max_queue_size: 30
